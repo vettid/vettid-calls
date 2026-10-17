@@ -1,0 +1,25 @@
+# syntax=docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# VettID calling service: the credential issuer's function archive
+# (CALLING-SERVICE 0.2.0 §4.2, §8.2): a zip holding one file, "bootstrap",
+# the issuer built for linux/arm64 (Lambda's provided.al2023 runtime).
+# Deployments pin the archive by SHA-256 (cdk.json stagingCallsIssuer).
+#   make archive          # dist/vettid-calls-issuer-linux-arm64.zip
+#   make archive-repro    # two clean builds, compared
+#
+# Reproducible: the toolchain image is pinned by digest, the build is
+# -trimpath with an empty build id and no VCS stamping, and tools/mkzip
+# writes the zip with fixed order, times (SOURCE_DATE_EPOCH) and modes.
+
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS build
+ARG VERSION=""
+ARG SOURCE_DATE_EPOCH=0
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+    go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=${VERSION}" -o /out/bootstrap ./cmd/vettid-calls \
+ && go run ./tools/mkzip -o /out/vettid-calls-issuer-linux-arm64.zip -mtime "${SOURCE_DATE_EPOCH}" /out/bootstrap=bootstrap
+
+FROM scratch AS archive
+COPY --from=build /out/vettid-calls-issuer-linux-arm64.zip /

@@ -1,0 +1,23 @@
+# gitleaks configuration for vettid-calls.
+# Extends the default ruleset. The only allowlisted values are public by
+# design: the TEST-ONLY TURN secrets of the tests and of the §5.3 vectors
+# (all-0x01, all-0xff and counting bytes; no deployment uses them), the
+# three PUBLIC manifest keys (SubjectPublicKeyInfo) the issuer pins, and
+# the real attestation document under internal/attest/testdata (public
+# data, see its README).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test-only TURN secrets, §5.3 vectors and pinned public keys (public)"
+regexTarget = "match"
+regexes = [
+  '''AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=?''',
+  '''//////////////////////////////////////////8=''',
+  '''AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=''',
+  '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE[A-Za-z0-9+/]{80,90}={0,2}''',
+]
+paths = [
+  '''internal/attest/testdata/aws-attestation-2025-09-16\.b64''',
+  '''internal/turncred/testdata/vectors\.json''',
+]

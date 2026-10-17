@@ -1,0 +1,182 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: go mod verify
+        run: go mod verify
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+      - name: go test -race
+        run: go test -race -count=1 ./...
+      - name: build
+        run: make build
+
+  gitleaks:
+    # Pinned binary over the FULL history (the gitleaks-action fails on a
+    # branch's first push, where there is no "before" commit).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: install gitleaks v8.30.1 (checksum-verified)
+        run: |
+          curl -sSLo gl.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gl.tgz" | sha256sum -c -
+          tar -xzf gl.tgz gitleaks
+      - name: scan full history
+        run: ./gitleaks git --redact --verbose .
+
+  archive:
+    # The issuer's function archive (CALLING-SERVICE §4.4, §8.2): two clean
+    # builds in the pinned toolchain image must give one SHA-256, the value
+    # deployments pin in cdk.json (stagingCallsIssuer).
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: reproducible archive (two clean builds, same SHA-256)
+        # With podman (preinstalled on the runner), from VettID's mirror.
+        run: make archive-repro CONTAINER=podman IMAGE_MIRROR=ghcr.io/vettid/mirror
+      - name: digest
+        run: sha256sum dist/repro-a/vettid-calls-issuer-linux-arm64.zip | tee -a "$GITHUB_STEP_SUMMARY"
+
+  image:
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: mirror settings match the Dockerfiles
+        # BUILDKIT_SYNTAX must be the mirror of the Dockerfiles' pinned
+        # # syntax digest, and each build-contexts key must be one of their
+        # FROM references (a key that matches no FROM is ignored, and the
+        # image would come from Docker Hub after all).
+        run: |
+          bad=0
+          want=$(sed -nE '1s/^# syntax=[^ ]+@(sha256:[0-9a-f]{64})$/\1/p' Dockerfile)
+          [ -n "$want" ] || { echo "::error::the Dockerfile's # syntax line is not pinned by digest"; bad=1; }
+          [ "$(sed -nE '1s/^# syntax=[^ ]+@(sha256:[0-9a-f]{64})$/\1/p' Dockerfile.issuer)" = "$want" ] || { echo "::error::Dockerfile.issuer's # syntax differs"; bad=1; }
+          syn=$(grep -oE '^ +BUILDKIT_SYNTAX=[^ ]+' .github/workflows/ci.yml | sed -E 's/^ +//' || true)
+          [ -n "$syn" ] || { echo "::error::no BUILDKIT_SYNTAX in ci.yml"; bad=1; }
+          for v in $syn; do
+            [ "${v##*@}" = "$want" ] || { echo "::error::$v, Dockerfile # syntax digest $want"; bad=1; }
+          done
+          froms=$(sed -nE 's/^FROM (--platform=[^ ]+ )?([^ ]+).*/\2/p' Dockerfile Dockerfile.issuer)
+          keys=$(grep -oE '^ +[^ =#]+@sha256:[0-9a-f]{64}=docker-image://' .github/workflows/ci.yml | sed -E 's/^ +//; s/=docker-image:\/\/$//' || true)
+          [ -n "$keys" ] || { echo "::error::no build-contexts in ci.yml"; bad=1; }
+          for k in $keys; do
+            grep -qxF -- "$k" <<<"$froms" || { echo "::error::build-contexts key $k is not a FROM of the Dockerfiles"; bad=1; }
+          done
+          exit "$bad"
+      # binfmt, BuildKit, the Dockerfile frontend and the base images from
+      # VettID's mirror of the upstream digests (vettid.org .github/mirror),
+      # not Docker Hub; upstream references in the comments.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          # docker.io/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          image: ghcr.io/vettid/mirror/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # docker.io/moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea (v0.33.1)
+          driver-opts: image=ghcr.io/vettid/mirror/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      - name: build image (amd64 + arm64, not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          # Dockerfile: # syntax=docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+          #             FROM docker.io/library/golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c
+          #             FROM docker.io/coturn/coturn:4.18.0-r0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
+          build-args: |
+            VERSION=${{ github.sha }}
+            BUILDKIT_SYNTAX=ghcr.io/vettid/mirror/dockerfile@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+          build-contexts: |
+            docker.io/library/golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c=docker-image://ghcr.io/vettid/mirror/golang@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c
+            docker.io/coturn/coturn:4.18.0-r0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3=docker-image://ghcr.io/vettid/mirror/coturn@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
+          tags: vettid-calls-turn:ci
+      - name: reproducible build (two clean builds, same image)
+        # With podman (preinstalled on the runner): the path the
+        # Makefile target is written for.
+        run: make image-repro CONTAINER=podman IMAGE_MIRROR=ghcr.io/vettid/mirror
+
+  publish:
+    # main only: publish the multi-arch server image to GHCR and the
+    # issuer's archive as a release asset. Deployments pin the image's
+    # digest (cdk.json stagingCallsTurnImage) and the archive's SHA-256
+    # (stagingCallsIssuer), never a tag, so a push here deploys nothing by
+    # itself.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [test, gitleaks, archive, image]
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          # docker.io/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          image: ghcr.io/vettid/mirror/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # docker.io/moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea (v0.33.1)
+          driver-opts: image=ghcr.io/vettid/mirror/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push the server image (amd64 + arm64)
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          # Dockerfile: # syntax=docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+          #             FROM docker.io/library/golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c
+          #             FROM docker.io/coturn/coturn:4.18.0-r0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
+          build-args: |
+            VERSION=${{ github.sha }}
+            BUILDKIT_SYNTAX=ghcr.io/vettid/mirror/dockerfile@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+          build-contexts: |
+            docker.io/library/golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c=docker-image://ghcr.io/vettid/mirror/golang@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c
+            docker.io/coturn/coturn:4.18.0-r0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3=docker-image://ghcr.io/vettid/mirror/coturn@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
+          tags: |
+            ghcr.io/${{ github.repository }}/turn:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository }}/turn:main
+      - name: build the issuer's archive
+        run: make archive CONTAINER=podman IMAGE_MIRROR=ghcr.io/vettid/mirror
+      - name: publish the archive as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="issuer-${GITHUB_SHA::12}"
+          sum=$(sha256sum dist/vettid-calls-issuer-linux-arm64.zip | cut -d' ' -f1)
+          gh release create "$tag" dist/vettid-calls-issuer-linux-arm64.zip --target "$GITHUB_SHA" \
+            --title "$tag" --notes "The issuer's function archive of ${GITHUB_SHA}. SHA-256: ${sum}"
+      - name: digests
+        run: |
+          echo "Published ghcr.io/${{ github.repository }}/turn@${{ steps.push.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          sha256sum dist/vettid-calls-issuer-linux-arm64.zip | tee -a "$GITHUB_STEP_SUMMARY"
