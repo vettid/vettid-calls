@@ -1,0 +1,84 @@
+# turnserver.conf, rendered by turn-agent (vettid-calls) from
+# internal/turnagent/turnserver.conf.tmpl: CALLING-SERVICE 0.2.0 §7.2.
+# It holds the TURN secrets: it lives on a tmpfs only and is never logged.
+#
+# Option names and defaults are coturn 4.18.0's, checked against its
+# source (src/apps/relay/mainrelay.c, README.turnserver). In 4.18.0 these
+# §7.2 rules are already the defaults and are therefore not written here
+# (writing the deprecated negative forms only makes coturn log errors):
+#   - no RFC 5780 behaviour discovery     (rfc5780 is opt-in; no-rfc5780 is deprecated)
+#   - no pre-RFC 5389 compatibility       (stun-backward-compatibility, rfc3489-compatibility are opt-in)
+#   - no SOFTWARE attribute               (software-attribute is opt-in; no-software-attribute is deprecated)
+#   - no CLI listener                     (cli is opt-in; no-cli is deprecated)
+#   - no web admin                        (web-admin is opt-in)
+#   - no DTLS listener                    (dtls is opt-in)
+#   - allocation lifetime: coturn's default, 10 minutes, refreshed by the client
+# turn-agent's tests fail if any of those options appears in the output.
+
+# --- Credentials (§5): TURN REST, no static users -------------------------
+realm={{.Realm}}
+server-name={{.Realm}}
+use-auth-secret
+{{- range .Secrets}}
+static-auth-secret={{.}}
+{{- end}}
+
+# --- Listeners: STUN and TURN on UDP and TCP 3478; no TLS in C2 (§4.3) -----
+listening-port=3478
+{{- range .ListenIPs}}
+listening-ip={{.}}
+{{- end}}
+{{- range .ListenIPs}}
+relay-ip={{.}}
+{{- end}}
+{{- if .ExternalIPv4}}
+external-ip={{.ExternalIPv4}}
+{{- end}}
+min-port=49152
+max-port=65535
+no-tls
+fingerprint
+
+# --- Relaying (§7.2) --------------------------------------------------------
+# Calls are UDP; a TCP relay is a general proxy.
+no-tcp-relay
+no-multicast-peers
+# Where a relay may not send: loopback, link-local, private, shared,
+# multicast, reserved and documentation ranges, the instance metadata
+# addresses, IPv6 unique-local, link-local, IPv4-mapped and NAT64 ranges,
+# and the service's own network. coturn takes ranges, not CIDR blocks.
+{{- range .DeniedPeers}}
+denied-peer-ip={{.}}
+{{- end}}
+# The server's own public addresses stay allowed: a call relayed on both
+# sides is one allocation sending to another on this server (CALLS-PLAN
+# §10 risk 6). An allowed rule wins over a denied one.
+{{- range .AllowedPeers}}
+allowed-peer-ip={{.}}
+{{- end}}
+
+# --- Caps (§7.2, D15, D16) --------------------------------------------------
+# coturn's bandwidth options are in BYTES per second, each direction
+# separately: {{.MaxKbps}} kbit/s = {{.MaxBps}} B/s; {{.CapacityKbps}} kbit/s = {{.CapacityBps}} B/s.
+# bps-capacity reserves max-bps for every allocation, so at most
+# {{.CapacityAllocations}} allocations can be relayed at once whatever total-quota says.
+max-bps={{.MaxBps}}
+bps-capacity={{.CapacityBps}}
+user-quota={{.UserQuota}}
+total-quota={{.TotalQuota}}
+
+# --- Counters for turn-agent, on the loopback interface only (§10) ----------
+# No username labels.
+prometheus
+prometheus-address=127.0.0.1
+prometheus-port={{.PrometheusPort}}
+
+# --- Log: to turn-agent's pipe, counted in memory and discarded (§10) -------
+log-file=stdout
+simple-log
+# coturn 4.18.0 logs an ALLOCATE refusal (486, 508) only in verbose mode
+# and has no Prometheus counter for it; turn-agent counts those lines for
+# allocations_refused{reason}. The extra lines name sessions, like every
+# other line, and are dropped in turn-agent's memory as they are read.
+verbose
+pidfile={{.RunDir}}/turnserver.pid
