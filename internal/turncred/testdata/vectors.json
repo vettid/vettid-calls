@@ -1,0 +1,35 @@
+{
+  "description": "TURN REST credential vectors for CALLING-SERVICE 0.2.0 \u00a75.3. The specification has no vectors; these were written for vettid-calls and computed with Python's hmac module (independently of the Go code that the tests check against them). The HMAC key is the secret's base64 TEXT, as coturn uses its static-auth-secret string. Test values only: no deployment uses these secrets.",
+  "vectors": [
+    {
+      "name": "all-0x01 secret, random 00..0f",
+      "secret": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+      "now": "2026-10-17T12:00:00Z",
+      "lifetime_seconds": 21600,
+      "random_hex": "000102030405060708090a0b0c0d0e0f",
+      "username": "1792260000:AAECAwQFBgcICQoLDA0ODw",
+      "credential": "MaaPcTjsqaJt6hDxV4yFaFnuXws=",
+      "exp": 1792260000
+    },
+    {
+      "name": "all-0xff secret, random ff..f0",
+      "secret": "//////////////////////////////////////////8=",
+      "now": "2026-10-17T12:00:00Z",
+      "lifetime_seconds": 21600,
+      "random_hex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0",
+      "username": "1792260000:__79_Pv6-fj39vX08_Lx8A",
+      "credential": "G+mdzITHqCRywYQpzThX3yz/Cf0=",
+      "exp": 1792260000
+    },
+    {
+      "name": "counting secret, random of 0xfb (base64url '-' and '_')",
+      "secret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "now": "2030-01-01T00:00:00Z",
+      "lifetime_seconds": 21600,
+      "random_hex": "fbffbffbffbffbffbffbffbffbffbffe",
+      "username": "1893477600:-_-_-_-_-_-_-_-_-_-__g",
+      "credential": "6J2KVCTwUbTpT2+Jbm/yizks5Fs=",
+      "exp": 1893477600
+    }
+  ]
+}
