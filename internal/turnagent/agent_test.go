@@ -80,6 +80,54 @@ func TestLogCounter(t *testing.T) {
 	}
 }
 
+// Every 508 and 486 text coturn 4.18.0 can write for an ALLOCATE, in both
+// of log_method's formats (with and without an origin): only the ones
+// that mean the server is full are counted.
+func TestLogCounterTexts(t *testing.T) {
+	c := &LogCounter{TotalQuota: 100, Allocations: func() float64 { return 3 }}
+	for _, pre := range []string{
+		"1729166400: : session 001000000000000001: realm <turn.staging.vettid.org> user <1792260000:AAECAwQFBgcICQoLDA0ODw>: ",
+		"1729166400: : session 001000000000000001: origin <https://example.org> realm <turn.staging.vettid.org> user <1792260000:AAECAwQFBgcICQoLDA0ODw>: ",
+	} {
+		for text, want := range map[string]string{
+			"486: Allocation Quota Reached":                                                "quota_user",
+			"486: Allocation Bandwidth Quota Reached":                                      "capacity",
+			"508: Cannot create socket":                                                    "capacity",
+			"508: Cannot create relay socket":                                              "capacity",
+			"508: Insufficient Capacity":                                                   "capacity",
+			"508: Dual allocation cannot be supported in the current server configuration": "",
+			"508: Cannot find reserved socket":                                             "",
+			"508: EVEN-PORT is not supported with multiplex-peer":                          "",
+			"486: Allocation Quota Reached, but not quite":                                 "",
+			"440: Unsupported address family":                                              "",
+			"400: Bad Request":                                                             "",
+			"437: Allocation Mismatch":                                                     "",
+		} {
+			c.Line(pre + "incoming packet ALLOCATE processed, error " + text + " (session 001000000000000001)\n")
+			got := c.Take()
+			if want == "" && len(got) != 0 || want != "" && (len(got) != 1 || got[want] != 1) {
+				t.Errorf("%q: %v, want %q", text, got, want)
+			}
+		}
+	}
+}
+
+// A line too long to look at is skipped without stopping the count, and
+// the reader is read to its end.
+func TestLogCounterLongLine(t *testing.T) {
+	c := &LogCounter{}
+	refusal := "x: incoming packet ALLOCATE processed, error 508: Cannot create socket (session 1)"
+	long := strings.Repeat("a", 3*maxLogLine) + refusal + "\n"               // not counted: past the limit
+	r := strings.NewReader(refusal + "\n" + long + refusal + "\n" + refusal) // the last has no newline
+	c.Consume(r)
+	if got := c.Take(); got[RefusedCapacity] != 3 || len(got) != 1 {
+		t.Fatalf("%v", got)
+	}
+	if r.Len() != 0 {
+		t.Fatal("not read to the end")
+	}
+}
+
 type fakeProc struct {
 	done chan struct{}
 	once sync.Once
