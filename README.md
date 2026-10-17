@@ -142,7 +142,7 @@ docker run --network host --read-only --log-driver none \
 | `CALLS_METRICS` | `cloudwatch` | `cloudwatch` (PutMetricData), `emf` (standard output) or `none` |
 | `CALLS_METRICS_NAMESPACE` | `vettid-calls` | e.g. `vettid-org/staging/calls` (§10) |
 | `CALLS_MAX_KBPS` | `256` | Bandwidth per allocation, each direction, kbit/s (D15; 3000 with video, C4) |
-| `CALLS_CAPACITY_KBPS` | `4000` | Bandwidth in total, kbit/s (D16) |
+| `CALLS_CAPACITY_KBPS` | `120000` | Bandwidth in total, kbit/s: 40 allocations at C4's 3000 (see "Caps" below) |
 | `CALLS_USER_QUOTA` / `CALLS_TOTAL_QUOTA` | `10` / `100` | Allocations per credential / in total |
 | `CALLS_RUN_DIR` | `/run/vettid-calls` | The tmpfs |
 | `CALLS_TURNSERVER` | `/usr/bin/turnserver` | coturn's binary |
@@ -259,10 +259,22 @@ let both import it; until then keep the two in step.
   `internal/turncred/testdata/vectors.json` were written here: the
   specification has none.
 - **Caps (§7.2).** coturn's `max-bps` and `bps-capacity` are bytes per
-  second: 256 kbit/s is `max-bps=32000`, 4 Mbit/s is
-  `bps-capacity=500000`. coturn reserves `max-bps` from the capacity for
-  each allocation, so with these values at most 15 allocations are relayed
-  at once; `total-quota=100` is not reached first.
+  second: 256 kbit/s is `max-bps=32000`, 120 Mbit/s is
+  `bps-capacity=15000000`. coturn reserves `max-bps` from the capacity
+  for **every allocation, used or not** (the last one admitted gets what
+  is left), and a phone's WebRTC keeps every relay allocation it made for
+  the life of the call: one per TURN URL (UDP and TCP) per network, so 2
+  to 4 per phone and up to 8 per call, whether the call ends up relayed
+  or direct. The capacity is therefore sized in allocations: 120 Mbit/s
+  is **40 allocations at C4's 3 Mbit/s** (D15), five video calls at the
+  worst count of 8, which is every call staging's at most ten testers can
+  hold at once. While calls are voice only it admits 469, so
+  `total-quota=100` binds first (12 to 25 calls). (The capacity was 4
+  Mbit/s, 15 or 16 voice allocations and a single one at 3 Mbit/s.) What
+  bounds cost is the daily stop at 30 GB (§7.3), not this cap; the media
+  actually relayed is far below it (a relayed side of a 720p call is 1 to
+  2.5 Mbit/s each way), and 120 Mbit/s stays under a `t4g.small`'s
+  baseline network bandwidth (128 Mbit/s).
 - **Defaults (§7.2).** In coturn 4.18.0 RFC 5780, the SOFTWARE attribute,
   pre-RFC 5389 compatibility, the CLI, the web admin and DTLS are all off
   unless switched on; the deprecated `no-…` forms are not written.

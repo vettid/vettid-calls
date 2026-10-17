@@ -60,8 +60,9 @@ allowed-peer-ip={{.}}
 # --- Caps (§7.2, D15, D16) --------------------------------------------------
 # coturn's bandwidth options are in BYTES per second, each direction
 # separately: {{.MaxKbps}} kbit/s = {{.MaxBps}} B/s; {{.CapacityKbps}} kbit/s = {{.CapacityBps}} B/s.
-# bps-capacity reserves max-bps for every allocation, so at most
-# {{.CapacityAllocations}} allocations can be relayed at once whatever total-quota says.
+# bps-capacity reserves max-bps for every allocation, used or not, so it
+# admits {{.CapacityAllocations}} allocations; with total-quota {{.TotalQuota}}, at most
+# {{.MaxAllocations}} allocations are relayed at once.
 max-bps={{.MaxBps}}
 bps-capacity={{.CapacityBps}}
 user-quota={{.UserQuota}}

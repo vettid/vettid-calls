@@ -22,12 +22,25 @@ var confTemplate string
 var tmpl = template.Must(template.New("turnserver.conf").Option("missingkey=error").Parse(confTemplate))
 
 // Default caps (§7.2; D15, D16).
+//
+// coturn reserves max-bps out of bps-capacity for every allocation, used
+// or not, and a phone's WebRTC keeps every relay allocation it made for
+// the life of the call: one per TURN URL (UDP and TCP) per network, so 2
+// to 4 per phone and up to 8 per call, relayed or direct. The capacity
+// is sized for C4's video cap (3 Mbit/s an allocation, D15): 120 Mbit/s
+// is 40 such allocations, five video calls at the worst count of 8, the
+// most staging's at most ten testers can hold at once. While calls are
+// voice only (256 kbit/s) it admits 469, so total-quota binds first.
 const (
-	DefaultMaxKbps      = 256  // per allocation, each direction, while calls are voice only (D15)
-	DefaultCapacityKbps = 4000 // in total, staging (D16)
-	DefaultUserQuota    = 10   // allocations per credential
-	DefaultTotalQuota   = 100  // allocations in total, staging (D16)
-	DefaultPromPort     = 9641 // coturn's Prometheus port, on 127.0.0.1
+	DefaultMaxKbps      = 256    // per allocation, each direction, while calls are voice only (D15)
+	DefaultCapacityKbps = 120000 // in total, staging: 40 allocations at C4's 3000 (D16 as revised)
+	DefaultUserQuota    = 10     // allocations per credential
+	DefaultTotalQuota   = 100    // allocations in total, staging (D16)
+	DefaultPromPort     = 9641   // coturn's Prometheus port, on 127.0.0.1
+
+	// maxKbps bounds both bandwidth options: coturn keeps bps-capacity
+	// in a 32-bit count of bytes per second (about 34 Gbit/s).
+	maxKbps = 10_000_000
 )
 
 // deniedPeers are the ranges of §7.2 that a relay may not send to, as
@@ -88,7 +101,8 @@ type view struct {
 	Realm, ExternalIPv4, RunDir                   string
 	Secrets, ListenIPs, DeniedPeers, AllowedPeers []string
 	MaxKbps, MaxBps, CapacityKbps, CapacityBps    int
-	CapacityAllocations, UserQuota, TotalQuota    int
+	CapacityAllocations, MaxAllocations           int
+	UserQuota, TotalQuota                         int
 	PrometheusPort                                int
 }
 
@@ -131,6 +145,13 @@ func secretOK(s string) bool {
 	return true
 }
 
+// CapacityAllocations is how many allocations bps-capacity admits when
+// each reserves maxBps: coturn 4.18.0 (netengine.c allocate_bps) gives
+// the last one what is left, so a remainder admits one more.
+func CapacityAllocations(maxBps, capacityBps int) int {
+	return (capacityBps + maxBps - 1) / maxBps
+}
+
 // Render returns coturn's configuration.
 func Render(p Params) ([]byte, error) {
 	if err := issuer.ValidHost(p.Realm); err != nil {
@@ -157,11 +178,14 @@ func Render(p Params) ([]byte, error) {
 		MaxKbps: orDefault(p.MaxKbps, DefaultMaxKbps), CapacityKbps: orDefault(p.CapacityKbps, DefaultCapacityKbps),
 		UserQuota: orDefault(p.UserQuota, DefaultUserQuota), TotalQuota: orDefault(p.TotalQuota, DefaultTotalQuota),
 		PrometheusPort: orDefault(p.PrometheusPort, DefaultPromPort)}
-	if v.MaxKbps < 8 || v.CapacityKbps < v.MaxKbps || v.UserQuota < 1 || v.TotalQuota < 1 {
+	if v.MaxKbps < 8 || v.CapacityKbps < v.MaxKbps || v.CapacityKbps > maxKbps || v.UserQuota < 1 || v.TotalQuota < 1 {
 		return nil, errors.New("turnagent: caps out of range")
 	}
 	v.MaxBps, v.CapacityBps = v.MaxKbps*1000/8, v.CapacityKbps*1000/8
-	v.CapacityAllocations = v.CapacityBps / v.MaxBps
+	v.CapacityAllocations, v.MaxAllocations = CapacityAllocations(v.MaxBps, v.CapacityBps), v.TotalQuota
+	if v.CapacityAllocations < v.MaxAllocations {
+		v.MaxAllocations = v.CapacityAllocations
+	}
 	v.ListenIPs = []string{p.PrivateIPv4.String()}
 	v.ExternalIPv4 = p.PublicIPv4.String() + "/" + p.PrivateIPv4.String()
 	v.AllowedPeers = []string{p.PublicIPv4.String()}

@@ -76,9 +76,9 @@ func TestRender(t *testing.T) {
 	// Relaying.
 	one(t, o, "no-tcp-relay", "")
 	one(t, o, "no-multicast-peers", "")
-	// Caps: bytes per second (256 kbit/s, 4 Mbit/s), quotas.
+	// Caps: bytes per second (256 kbit/s, 120 Mbit/s), quotas.
 	one(t, o, "max-bps", "32000")
-	one(t, o, "bps-capacity", "500000")
+	one(t, o, "bps-capacity", "15000000")
 	one(t, o, "user-quota", "10")
 	one(t, o, "total-quota", "100")
 	// Counters on loopback, no username labels.
@@ -88,7 +88,7 @@ func TestRender(t *testing.T) {
 	one(t, o, "log-file", "stdout")
 	one(t, o, "verbose", "")
 	one(t, o, "pidfile", "/run/vettid-calls/turnserver.pid")
-	if !strings.Contains(string(conf), "at most\n# 15 allocations") {
+	if !strings.Contains(string(conf), "admits 469 allocations; with total-quota 100, at most\n# 100 allocations") {
 		t.Error("the capacity note")
 	}
 
@@ -188,6 +188,46 @@ func TestRenderCaps(t *testing.T) {
 	one(t, o, "bps-capacity", "3000000")
 	one(t, o, "total-quota", "200")
 	one(t, o, "user-quota", "5")
+	if !strings.Contains(string(conf), "admits 8 allocations; with total-quota 200, at most\n# 8 allocations") {
+		t.Error("the capacity note")
+	}
+}
+
+// The defaults are sized for C4 (D15: 3 Mbit/s an allocation with video):
+// 40 allocations, five calls at 8 allocations each. Voice is bounded by
+// total-quota instead.
+func TestDefaultCapacity(t *testing.T) {
+	const c4Kbps, perCall, calls = 3000, 8, 5
+	if got := CapacityAllocations(c4Kbps*1000/8, DefaultCapacityKbps*1000/8); got != perCall*calls {
+		t.Errorf("C4: %d allocations, want %d", got, perCall*calls)
+	}
+	if got := CapacityAllocations(DefaultMaxKbps*1000/8, DefaultCapacityKbps*1000/8); got < DefaultTotalQuota {
+		t.Errorf("voice: %d allocations, below total-quota %d", got, DefaultTotalQuota)
+	}
+	p := params()
+	p.MaxKbps = c4Kbps
+	conf, err := Render(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(conf), "admits 40 allocations; with total-quota 100, at most\n# 40 allocations") {
+		t.Error("the capacity note at C4's cap")
+	}
+}
+
+// coturn 4.18.0 gives the last allocation what is left of bps-capacity.
+func TestCapacityAllocations(t *testing.T) {
+	for _, c := range []struct{ maxBps, capBps, want int }{
+		{32000, 500000, 16}, // 15 at the full rate and one at 20000
+		{32000, 480000, 15},
+		{375000, 15000000, 40},
+		{375000, 375000, 1},
+		{375000, 375001, 2},
+	} {
+		if got := CapacityAllocations(c.maxBps, c.capBps); got != c.want {
+			t.Errorf("%d/%d: %d, want %d", c.capBps, c.maxBps, got, c.want)
+		}
+	}
 }
 
 func TestRenderRefuses(t *testing.T) {
@@ -202,6 +242,7 @@ func TestRenderRefuses(t *testing.T) {
 		"v6 as private v4":  func(p *Params) { p.PrivateIPv4 = netip.MustParseAddr("::1") },
 		"v4 as v6":          func(p *Params) { p.IPv6 = netip.MustParseAddr("::ffff:1.2.3.4") },
 		"capacity < cap":    func(p *Params) { p.CapacityKbps = 100 },
+		"capacity > 32 bit": func(p *Params) { p.CapacityKbps = 10_000_001 },
 		"run dir":           func(p *Params) { p.RunDir = "" },
 	}
 	for name, mut := range cases {
