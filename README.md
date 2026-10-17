@@ -268,9 +268,22 @@ let both import it; until then keep the two in step.
   unless switched on; the deprecated `no-…` forms are not written.
 - **Refusals (§10).** coturn 4.18.0 has no Prometheus counter for refused
   allocations and logs them only in verbose mode; `turn-agent` runs coturn
-  verbose and counts the lines in memory. `quota_total` and `quota_user`
-  share one log text; `turn-agent` tells them apart by the current
-  allocations.
+  verbose and counts the lines in memory: each line is matched against
+  fixed texts, a counter is incremented, and the line is dropped. Nothing
+  of a line (address, username, session) is kept, written or sent.
+  Counted: `486 Allocation Bandwidth Quota Reached` (`bps-capacity` fully
+  reserved) and the 508 answers that mean no relay socket was left
+  (`Cannot create socket`, `Cannot create relay socket`, `Insufficient
+  Capacity`) as `capacity`; `486 Allocation Quota Reached` as
+  `quota_total` or `quota_user`, which share that text and are told apart
+  by the allocations of the last scrape (at most a minute old, so a
+  refusal right after the total quota frees up can be counted as
+  `quota_user`; the `relay-capacity` alarm's allocations threshold still
+  fires). Not counted: the 508 answers about the request itself (a dual
+  IPv4 and IPv6 allocation, which `external-ip` rules out; an unknown
+  reservation token), the 401 that starts every authenticated
+  allocation, and refusals of other methods (such as a REFRESH over
+  quota). A line longer than 16 KiB is skipped and counting goes on.
 - **No replay cache (§5.2).** A request replayed within its 90 s window
   is answered again with other credentials, by design.
 - **Expiry.** coturn refuses a username whose expiry is before now, on

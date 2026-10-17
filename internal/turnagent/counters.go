@@ -127,13 +127,28 @@ type LogCounter struct {
 }
 
 // The log texts of coturn 4.18.0 (ns_turn_server.c log_method and
-// ns_turn_msg.c get_default_reason).
+// ns_turn_msg.c get_default_reason). log_method writes an ALLOCATE
+// answer only in verbose mode, as "... incoming packet ALLOCATE
+// processed, error <code>: <reason> (session <id>)".
 const (
 	logAllocateError = "incoming packet ALLOCATE processed, error "
-	logQuota         = "486: Allocation Quota Reached"
-	logBandwidth     = "486: Allocation Bandwidth Quota Reached"
-	logCapacity      = "508:"
+	logQuota         = "486: Allocation Quota Reached "
+	logBandwidth     = "486: Allocation Bandwidth Quota Reached "
 )
+
+// logNoRelayPort are the 508 answers to an ALLOCATE that mean the server
+// had no relay socket left (ns_turn_server.c create_relay_connection;
+// "Insufficient Capacity" is the default text when no reason was set).
+// Other 508 answers are about the request, not the server's capacity,
+// and are not counted: "Dual allocation cannot be supported in the
+// current server configuration" (a client asking for IPv4 and IPv6 at
+// once while external-ip is set) and "Cannot find reserved socket" (an
+// expired or unknown RESERVATION-TOKEN).
+var logNoRelayPort = []string{
+	"508: Cannot create socket ",
+	"508: Cannot create relay socket ",
+	"508: Insufficient Capacity ",
+}
 
 // Line counts one log line.
 func (c *LogCounter) Line(line string) {
@@ -145,13 +160,13 @@ func (c *LogCounter) Line(line string) {
 	var reason string
 	switch {
 	case strings.HasPrefix(rest, logBandwidth):
-		reason = RefusedCapacity
+		reason = RefusedCapacity // bps-capacity fully reserved
 	case strings.HasPrefix(rest, logQuota):
 		reason = RefusedQuotaUser
 		if c.TotalQuota > 0 && c.Allocations != nil && c.Allocations() >= float64(c.TotalQuota) {
 			reason = RefusedQuotaTotal
 		}
-	case strings.HasPrefix(rest, logCapacity):
+	case hasAnyPrefix(rest, logNoRelayPort):
 		reason = RefusedCapacity // no relay port left
 	default:
 		return
@@ -164,16 +179,42 @@ func (c *LogCounter) Line(line string) {
 	c.mu.Unlock()
 }
 
-// Consume counts every line of r until it ends; the lines are dropped.
-func (c *LogCounter) Consume(r io.Reader) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 16<<10), 64<<10)
-	for sc.Scan() {
-		c.Line(sc.Text())
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
 	}
-	// A line over 64 KiB stops the scanner; drain the rest unread so
-	// coturn never blocks on a full pipe.
-	_, _ = io.Copy(io.Discard, r)
+	return false
+}
+
+// maxLogLine is the longest line Consume looks at. coturn's lines are far
+// shorter (a username or realm is at most 512 bytes); a longer one is
+// skipped to its end, uncounted, and counting goes on with the next line.
+const maxLogLine = 16 << 10
+
+// Consume counts every line of r until it ends; the lines are dropped.
+// It reads until r ends, whatever it holds, so coturn never blocks on a
+// full pipe.
+func (c *LogCounter) Consume(r io.Reader) {
+	br := bufio.NewReaderSize(r, maxLogLine)
+	skipping := false
+	for {
+		b, err := br.ReadSlice('\n')
+		switch {
+		case err == bufio.ErrBufferFull:
+			skipping = true // too long: drop it to its newline
+			continue
+		case skipping:
+			skipping = false // the tail of a skipped line
+		case len(b) > 0:
+			c.Line(string(b))
+		}
+		if err != nil && err != bufio.ErrBufferFull {
+			_, _ = io.Copy(io.Discard, r)
+			return
+		}
+	}
 }
 
 // Take returns the refusals counted since the last call and resets them.
