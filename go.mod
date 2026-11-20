@@ -2,6 +2,8 @@ module github.com/vettid/vettid-calls
 
 go 1.26.0
 
+toolchain go1.26.11
+
 require (
 	github.com/aws/aws-lambda-go v1.54.0
 	github.com/aws/aws-sdk-go-v2 v1.47.3
