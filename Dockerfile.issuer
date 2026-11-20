@@ -10,7 +10,7 @@
 # -trimpath with an empty build id and no VCS stamping, and tools/mkzip
 # writes the zip with fixed order, times (SOURCE_DATE_EPOCH) and modes.
 
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS build
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.11-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS build
 ARG VERSION=""
 ARG SOURCE_DATE_EPOCH=0
 WORKDIR /src
