@@ -57,7 +57,7 @@ jobs:
         # With podman (preinstalled on the runner), from VettID's mirror.
         run: make archive-repro CONTAINER=podman IMAGE_MIRROR=ghcr.io/vettid/mirror
       - name: digest
-        run: sha256sum dist/repro-a/vettid-calls-issuer-linux-arm64.zip | tee -a "$GITHUB_STEP_SUMMARY"
+        run: sha256sum dist/repro-a/vettid-calls-issuer-linux-arm64.zip dist/repro-a/vettid-calls-renewer-linux-arm64.zip | tee -a "$GITHUB_STEP_SUMMARY"
 
   image:
     runs-on: ubuntu-latest
@@ -166,17 +166,18 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}/turn:sha-${{ github.sha }}
             ghcr.io/${{ github.repository }}/turn:main
-      - name: build the issuer's archive
+      - name: build the function archives (the issuer's and the renewer's)
         run: make archive CONTAINER=podman IMAGE_MIRROR=ghcr.io/vettid/mirror
-      - name: publish the archive as a release
+      - name: publish the archives as a release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="issuer-${GITHUB_SHA::12}"
           sum=$(sha256sum dist/vettid-calls-issuer-linux-arm64.zip | cut -d' ' -f1)
-          gh release create "$tag" dist/vettid-calls-issuer-linux-arm64.zip --target "$GITHUB_SHA" \
-            --title "$tag" --notes "The issuer's function archive of ${GITHUB_SHA}. SHA-256: ${sum}"
+          rsum=$(sha256sum dist/vettid-calls-renewer-linux-arm64.zip | cut -d' ' -f1)
+          gh release create "$tag" dist/vettid-calls-issuer-linux-arm64.zip dist/vettid-calls-renewer-linux-arm64.zip --target "$GITHUB_SHA" \
+            --title "$tag" --notes "The function archives of ${GITHUB_SHA}. Issuer SHA-256: ${sum}. Renewer SHA-256: ${rsum}"
       - name: digests
         run: |
           echo "Published ghcr.io/${{ github.repository }}/turn@${{ steps.push.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
-          sha256sum dist/vettid-calls-issuer-linux-arm64.zip | tee -a "$GITHUB_STEP_SUMMARY"
+          sha256sum dist/vettid-calls-issuer-linux-arm64.zip dist/vettid-calls-renewer-linux-arm64.zip | tee -a "$GITHUB_STEP_SUMMARY"

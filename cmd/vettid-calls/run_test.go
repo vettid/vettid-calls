@@ -212,7 +212,7 @@ func TestDependencies(t *testing.T) {
 	if testing.Short() {
 		t.Skip("go list")
 	}
-	for _, pkg := range []string{".", "../turn-agent", "../callsctl"} {
+	for _, pkg := range []string{".", "../turn-agent", "../callsctl", "../calls-renewer"} {
 		if _, err := os.Stat(pkg); err != nil {
 			continue
 		}

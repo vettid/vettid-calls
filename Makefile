@@ -7,6 +7,7 @@ VERSION   ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null)
 LDFLAGS   := -s -w -buildid= -X main.version=$(VERSION)
 CONTAINER ?= $(shell command -v docker || command -v podman)
 ARCHIVE   := vettid-calls-issuer-linux-arm64.zip
+RENEWER   := vettid-calls-renewer-linux-arm64.zip
 # The image's and the archive's timestamps: the commit's, so that two
 # builds of one commit are the same image and the same archive.
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
@@ -27,6 +28,7 @@ build:
 	CGO_ENABLED=0 $(GO) build -p 1 -trimpath -buildvcs=false -ldflags '$(LDFLAGS)' -o $(BIN)/vettid-calls ./cmd/vettid-calls
 	CGO_ENABLED=0 $(GO) build -p 1 -trimpath -buildvcs=false -ldflags '$(LDFLAGS)' -o $(BIN)/turn-agent ./cmd/turn-agent
 	CGO_ENABLED=0 $(GO) build -p 1 -trimpath -buildvcs=false -ldflags '$(LDFLAGS)' -o $(BIN)/callsctl ./cmd/callsctl
+	CGO_ENABLED=0 $(GO) build -p 1 -trimpath -buildvcs=false -ldflags '$(LDFLAGS)' -o $(BIN)/calls-renewer ./cmd/calls-renewer
 
 test:
 	$(GO) test $(TESTFLAGS) ./...
@@ -72,30 +74,35 @@ image-repro:
 	$(CONTAINER) rmi vettid-calls-turn:repro-a vettid-calls-turn:repro-b >/dev/null 2>&1 || true; \
 	test "$$a" = "$$b" && echo "reproducible" || { echo "NOT reproducible"; exit 1; }
 
-# The issuer's function archive, built in the pinned toolchain image.
+# The function archives (the issuer's and the renewer's), built in the
+# pinned toolchain image.
 archive:
 	@mkdir -p $(DIST)
 	$(CONTAINER) build --no-cache -f Dockerfile.issuer --target archive $(call mirror_contexts,Dockerfile.issuer) \
 	  --build-arg VERSION=$(VERSION) --build-arg SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) --output type=local,dest=$(DIST) .
-	@cd $(DIST) && sha256sum $(ARCHIVE)
+	@cd $(DIST) && sha256sum $(ARCHIVE) $(RENEWER)
 
-# Two clean builds of the archive; fails unless both have one SHA-256.
+# Two clean builds of the archives; fails unless each has one SHA-256.
 archive-repro:
 	@set -e; rm -rf $(DIST)/repro-a $(DIST)/repro-b; \
 	$(MAKE) --no-print-directory archive DIST=$(DIST)/repro-a >/dev/null; \
 	$(MAKE) --no-print-directory archive DIST=$(DIST)/repro-b >/dev/null; \
-	a=$$(sha256sum < $(DIST)/repro-a/$(ARCHIVE) | cut -d' ' -f1); \
-	b=$$(sha256sum < $(DIST)/repro-b/$(ARCHIVE) | cut -d' ' -f1); \
-	echo "archive A: $$a"; echo "archive B: $$b"; \
-	test "$$a" = "$$b" && echo "reproducible" || { echo "NOT reproducible"; exit 1; }
+	for z in $(ARCHIVE) $(RENEWER); do \
+	  a=$$(sha256sum < $(DIST)/repro-a/$$z | cut -d' ' -f1); \
+	  b=$$(sha256sum < $(DIST)/repro-b/$$z | cut -d' ' -f1); \
+	  echo "$$z A: $$a"; echo "$$z B: $$b"; \
+	  test "$$a" = "$$b" || { echo "$$z NOT reproducible"; exit 1; }; \
+	done; echo "reproducible"
 
-# The same archive with the local Go toolchain, without a container (its
-# SHA-256 matches the container's only with the same Go version).
+# The same archives with the local Go toolchain, without a container
+# (their SHA-256 match the container's only with the same Go version).
 archive-local:
-	@mkdir -p $(DIST)/local
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -p 1 -trimpath -buildvcs=false -ldflags '$(LDFLAGS)' -o $(DIST)/local/bootstrap ./cmd/vettid-calls
-	$(GO) run ./tools/mkzip -o $(DIST)/local/$(ARCHIVE) -mtime $(SOURCE_DATE_EPOCH) $(DIST)/local/bootstrap=bootstrap
-	@cd $(DIST)/local && sha256sum $(ARCHIVE)
+	@mkdir -p $(DIST)/local/issuer $(DIST)/local/renewer
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -p 1 -trimpath -buildvcs=false -ldflags '$(LDFLAGS)' -o $(DIST)/local/issuer/bootstrap ./cmd/vettid-calls
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -p 1 -trimpath -buildvcs=false -ldflags '$(LDFLAGS)' -o $(DIST)/local/renewer/bootstrap ./cmd/calls-renewer
+	$(GO) run ./tools/mkzip -o $(DIST)/local/$(ARCHIVE) -mtime $(SOURCE_DATE_EPOCH) $(DIST)/local/issuer/bootstrap=bootstrap
+	$(GO) run ./tools/mkzip -o $(DIST)/local/$(RENEWER) -mtime $(SOURCE_DATE_EPOCH) $(DIST)/local/renewer/bootstrap=bootstrap
+	@cd $(DIST)/local && sha256sum $(ARCHIVE) $(RENEWER)
 
 tidy:
 	$(GO) mod tidy
