@@ -143,7 +143,7 @@ docker run --network host --read-only --log-driver none \
 | `CALLS_METRICS_NAMESPACE` | `vettid-calls` | e.g. `vettid-org/staging/calls` (§10) |
 | `CALLS_MAX_KBPS` | `256` | Bandwidth per allocation, each direction, kbit/s (D15; 3000 with video, C4) |
 | `CALLS_CAPACITY_KBPS` | `120000` | Bandwidth in total, kbit/s: 40 allocations at C4's 3000 (see "Caps" below) |
-| `CALLS_USER_QUOTA` / `CALLS_TOTAL_QUOTA` | `10` / `100` | Allocations per credential / in total |
+| `CALLS_USER_QUOTA` / `CALLS_TOTAL_QUOTA` | `12` / `100` | Allocations per credential (3 TURN URLs × 2 networks × 2 address families, 0.3.0) / in total |
 | `CALLS_RUN_DIR` | `/run/vettid-calls` | The tmpfs |
 | `CALLS_TURNSERVER` | `/usr/bin/turnserver` | coturn's binary |
 | `CALLS_TLS_SECRET_ID` / `CALLS_TLS_FILE` | (unset: no TLS) | TURN over TLS on 443 (CALLING-SERVICE 0.3.0 §8.5): the certificate secret's id, or a file holding its document (`{"key": "<PKCS#8 PEM>", "chain": "<PEM, leaf first>"}`; `{}` is none). Read with the TURN secret; the last valid one is kept across a failed read. coturn listens on 443 only while one is valid |

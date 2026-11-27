@@ -79,7 +79,7 @@ func TestRender(t *testing.T) {
 	// Caps: bytes per second (256 kbit/s, 120 Mbit/s), quotas.
 	one(t, o, "max-bps", "32000")
 	one(t, o, "bps-capacity", "15000000")
-	one(t, o, "user-quota", "10")
+	one(t, o, "user-quota", "12")
 	one(t, o, "total-quota", "100")
 	// Counters on loopback, no username labels.
 	one(t, o, "prometheus", "")

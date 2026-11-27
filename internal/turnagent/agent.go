@@ -137,6 +137,7 @@ type running struct {
 	pw     *io.PipeWriter
 	tls    bool // started with TLS on 443
 	promUp bool // has answered on its Prometheus port since it started
+	fresh  bool // not yet past its first tick
 }
 
 func (a *Agent) start(conf string) (*running, error) {
@@ -147,7 +148,7 @@ func (a *Agent) start(conf string) (*running, error) {
 		pw.Close()
 		return nil, err
 	}
-	r := &running{proc: proc, done: make(chan struct{}), pw: pw, tls: a.tlsFiles() != nil}
+	r := &running{proc: proc, done: make(chan struct{}), pw: pw, tls: a.tlsFiles() != nil, fresh: true}
 	if t := a.TLS; t != nil {
 		// A new coturn reads the files as they are: no reload waits.
 		t.pending, t.prevLeaf, t.prevOK, t.reloadAt = false, nil, false, time.Time{}
@@ -234,6 +235,12 @@ func (a *Agent) Run(ctx context.Context) error {
 			// Started again at the first tick RestartDelay from now.
 			restartAt = time.Now().Add(a.RestartDelay)
 		case <-tick.C:
+			if a.TLS != nil {
+				// Before any restart of this tick, so that no file is
+				// renamed while coturn starts; tlsStep's read is then a
+				// no-op.
+				a.tlsLoad(ctx, cur != nil && cur.tls)
+			}
 			if cur == nil && !time.Now().Before(restartAt) {
 				ensure("exit")
 			} else if cur != nil {

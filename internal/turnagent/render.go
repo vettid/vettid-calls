@@ -35,7 +35,7 @@ var tmpl = template.Must(template.New("turnserver.conf").Option("missingkey=erro
 const (
 	DefaultMaxKbps      = 256    // per allocation, each direction, while calls are voice only (D15)
 	DefaultCapacityKbps = 120000 // in total, staging: 40 allocations at C4's 3000 (D16 as revised)
-	DefaultUserQuota    = 10     // allocations per credential
+	DefaultUserQuota    = 12     // allocations per credential: 3 TURN URLs × 2 networks × 2 families (0.3.0)
 	DefaultTotalQuota   = 100    // allocations in total, staging (D16)
 	DefaultPromPort     = 9641   // coturn's Prometheus port, on 127.0.0.1
 

@@ -70,8 +70,9 @@ type TLS struct {
 	prevOK       bool              // prevLeaf is accepted at the next handshake
 	loaded, last time.Time         // the last answered read, the last attempt
 	pending      bool              // files written, SIGUSR2 not sent yet
-	reloadAt     time.Time         // when SIGUSR2 was sent; zero: none waits
+	reloadAt     time.Time         // when the new files were written; zero: no reload waits
 	published    bool              // the last status put says verified
+	known        bool              // a status has been put since start
 	statusAt     time.Time         // when it was put
 }
 
@@ -97,11 +98,10 @@ func (a *Agent) tlsLoad(ctx context.Context, running bool) {
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	b, err := t.Source.Get(rctx)
-	if err != nil && !errors.Is(err, secretsrc.ErrNotFound) {
+	if err != nil && !errors.Is(err, secretsrc.ErrNotFound) && !errors.Is(err, secretsrc.ErrInvalid) {
 		a.fail("tls_read", errors.New("turnagent: reading the TLS certificate failed; the one in use stays"))
 		return
 	}
-	t.loaded = now
 	var d *tlscert.Doc
 	if err == nil {
 		d, err = tlscert.Parse(b)
@@ -110,22 +110,45 @@ func (a *Agent) tlsLoad(ctx context.Context, running bool) {
 		err = d.Verify(a.Params.Realm, t.Roots, now)
 	}
 	if err != nil {
-		// Empty, missing or failing the checks: no certificate is used.
+		// Empty, missing, too large or failing the checks: no
+		// certificate is used.
+		t.loaded = now
 		a.fail("tls_invalid", err)
-		t.inUse, t.prevLeaf, t.pending = nil, nil, false
+		a.tlsOff(ctx)
 		return
 	}
 	if tlscert.Same(d, t.inUse) {
+		t.loaded = now
 		return
 	}
 	if err := a.writeTLS(d); err != nil {
+		// Not loaded: tried again after TLSRetry, not TLSRefresh.
 		a.fail("config", err)
 		return
 	}
+	t.loaded = now
 	if running && t.inUse != nil {
-		t.prevLeaf, t.pending = t.inUse.Leaf(), true
+		// The 10 minutes start now: a SIGUSR2 that is never sent (coturn
+		// never answers on its Prometheus port) ends in a restart too.
+		t.prevLeaf, t.pending, t.reloadAt = t.inUse.Leaf(), true, now
 	}
 	t.inUse = d
+}
+
+// tlsOff stops using a certificate: the files go, and the zero status is
+// put at once (§8.5), whether coturn runs or not.
+func (a *Agent) tlsOff(ctx context.Context) {
+	t := a.TLS
+	had := t.inUse != nil
+	t.inUse, t.prevLeaf, t.pending, t.prevOK, t.reloadAt = nil, nil, false, false, time.Time{}
+	if had {
+		for _, name := range []string{TLSKeyName, TLSChainName} {
+			_ = os.Remove(filepath.Join(a.Params.RunDir, name))
+		}
+	}
+	if t.published || !t.known {
+		a.putStatus(ctx, turnsstatus.Status{})
+	}
 }
 
 // writeTLS writes the re-encoded chain and key for coturn, readable by
@@ -135,12 +158,26 @@ func (a *Agent) writeTLS(d *tlscert.Doc) error {
 	if err != nil {
 		return err
 	}
-	for name, b := range map[string][]byte{TLSKeyName: key, TLSChainName: chain} {
-		path := filepath.Join(a.Params.RunDir, name)
-		if err := os.WriteFile(path+".tmp", b, 0o600); err != nil {
+	files := []struct {
+		path string
+		b    []byte
+	}{{filepath.Join(a.Params.RunDir, TLSKeyName), key}, {filepath.Join(a.Params.RunDir, TLSChainName), chain}}
+	cleanup := func() {
+		for _, f := range files {
+			_ = os.Remove(f.path + ".tmp")
+		}
+	}
+	// Both written first, then both renamed: a failure leaves the pair in
+	// place as it was, never a new key with an old chain.
+	for _, f := range files {
+		if err := os.WriteFile(f.path+".tmp", f.b, 0o600); err != nil {
+			cleanup()
 			return errors.New("turnagent: writing the TLS files failed")
 		}
-		if err := os.Rename(path+".tmp", path); err != nil {
+	}
+	for _, f := range files {
+		if err := os.Rename(f.path+".tmp", f.path); err != nil {
+			cleanup()
 			return errors.New("turnagent: writing the TLS files failed")
 		}
 	}
@@ -165,7 +202,12 @@ func (a *Agent) tlsStep(ctx context.Context, cur *running) string {
 	now := t.now()
 	if t.inUse != nil && !now.Before(t.inUse.Leaf().NotAfter) {
 		a.fail("tls_invalid", errors.New("turnagent: the TLS certificate has ended"))
-		t.inUse, t.prevLeaf, t.pending = nil, nil, false
+		a.tlsOff(ctx)
+	}
+	if t.inUse == nil && (t.published || !t.known) {
+		// A fresh start without a valid certificate: the previous
+		// instance's status may still say verified.
+		a.putStatus(ctx, turnsstatus.Status{})
 	}
 	if cur == nil {
 		return ""
@@ -175,9 +217,12 @@ func (a *Agent) tlsStep(ctx context.Context, cur *running) string {
 	}
 	if !cur.tls {
 		a.Metrics.Set("tls", "Count", 0)
-		if t.published {
-			a.putStatus(ctx, turnsstatus.Status{}) // TLS is off: at once
-		}
+		return ""
+	}
+	if cur.fresh {
+		// Its first tick: coturn may not listen yet, and a handshake now
+		// would fail once for nothing.
+		cur.fresh = false
 		return ""
 	}
 	if t.pending && cur.promUp {
@@ -188,9 +233,13 @@ func (a *Agent) tlsStep(ctx context.Context, cur *running) string {
 		}
 	}
 	served, ok := a.probe(ctx)
+	if served != nil {
+		// Also when it is the wrong one: a reload that did not take is what
+		// turn-tls-served watches for.
+		a.Metrics.Set("tls_served_life_left", "Percent", tlscert.LifeLeft(served, now))
+	}
 	if ok {
 		a.Metrics.Set("tls", "Count", 1)
-		a.Metrics.Set("tls_served_life_left", "Percent", tlscert.LifeLeft(served, now))
 		if !t.published || now.Sub(t.statusAt) >= StatusRefresh {
 			a.putStatus(ctx, turnsstatus.Status{VerifiedAt: now.Unix(), NotAfter: served.NotAfter.Unix()})
 		}
@@ -217,7 +266,7 @@ func (a *Agent) tlsStep(ctx context.Context, cur *running) string {
 // SIGUSR2, the one before).
 func (a *Agent) probe(ctx context.Context) (*x509.Certificate, bool) {
 	t := a.TLS
-	acceptPrev := t.prevOK
+	acceptPrev := t.prevOK || t.pending
 	t.prevOK = false
 	dial := t.Dial
 	if dial == nil {
@@ -267,7 +316,7 @@ func dialLeaf(ctx context.Context, addr string, cfg *tls.Config) (*x509.Certific
 func (a *Agent) putStatus(ctx context.Context, s turnsstatus.Status) {
 	t := a.TLS
 	if t.Status == nil {
-		t.published, t.statusAt = s.VerifiedAt > 0, t.now()
+		t.published, t.known, t.statusAt = s.VerifiedAt > 0, true, t.now()
 		return
 	}
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -276,5 +325,5 @@ func (a *Agent) putStatus(ctx context.Context, s turnsstatus.Status) {
 		a.fail("tls_status", errors.New("turnagent: putting the TLS status failed"))
 		return
 	}
-	t.published, t.statusAt = s.VerifiedAt > 0, t.now()
+	t.published, t.known, t.statusAt = s.VerifiedAt > 0, true, t.now()
 }
