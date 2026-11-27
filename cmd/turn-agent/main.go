@@ -29,10 +29,12 @@ import (
 	"github.com/vettid/vettid-calls/internal/awsx"
 	"github.com/vettid/vettid-calls/internal/metrics"
 	"github.com/vettid/vettid-calls/internal/secretsrc"
+	"github.com/vettid/vettid-calls/internal/tlscert"
 	"github.com/vettid/vettid-calls/internal/turnagent"
+	"github.com/vettid/vettid-calls/internal/turnsstatus"
 )
 
-const specVersion = "0.2.0"
+const specVersion = "0.3.0"
 
 var version string
 
@@ -62,6 +64,11 @@ type config struct {
 	metrics    string // cloudwatch | emf | none
 	namespace  string
 	turnserver string
+	// TLS on 443 (CALLING-SERVICE 0.3.0 §8.5), only while it is switched
+	// on: the certificate secret (at most one of the two), and where the
+	// status for the issuer goes (at most one, and only with TLS).
+	tlsSecretID, tlsFile    string
+	statusParam, statusFile string
 }
 
 func load(lookup func(string) (string, bool)) (config, error) {
@@ -150,6 +157,23 @@ func load(lookup func(string) (string, bool)) (config, error) {
 	if v := get("CALLS_TURNSERVER"); v != "" {
 		c.turnserver = v
 	}
+	c.tlsSecretID, c.tlsFile = get("CALLS_TLS_SECRET_ID"), get("CALLS_TLS_FILE")
+	c.statusParam, c.statusFile = get("CALLS_TURNS_STATUS"), get("CALLS_TURNS_STATUS_FILE")
+	tlsOn := c.tlsSecretID != "" || c.tlsFile != ""
+	switch {
+	case c.tlsSecretID != "" && c.tlsFile != "":
+		bad("set at most one of CALLS_TLS_SECRET_ID and CALLS_TLS_FILE")
+	case c.tlsSecretID != "" && c.region == "":
+		bad("CALLS_TLS_SECRET_ID needs AWS_REGION")
+	}
+	switch {
+	case c.statusParam != "" && c.statusFile != "":
+		bad("set at most one of CALLS_TURNS_STATUS and CALLS_TURNS_STATUS_FILE")
+	case (c.statusParam != "" || c.statusFile != "") && !tlsOn:
+		bad("CALLS_TURNS_STATUS(_FILE) is for TLS on 443 only: set CALLS_TLS_SECRET_ID or CALLS_TLS_FILE")
+	case c.statusParam != "" && c.region == "":
+		bad("CALLS_TURNS_STATUS needs AWS_REGION")
+	}
 	// Render once with placeholders: every parameter error shows now.
 	p := c.params
 	p.Secrets = []string{"REDACTED"}
@@ -210,7 +234,33 @@ func run(ctx context.Context, cfg config) error {
 	if err := os.MkdirAll(cfg.params.RunDir, 0o700); err != nil {
 		return errors.New("creating the run directory failed")
 	}
-	logger.Info("turn-agent started", "version", buildVersion(), "realm", cfg.params.Realm, "secrets", cfg.secrets, "metrics", cfg.metrics)
+	var tlsOn *turnagent.TLS
+	if cfg.tlsSecretID != "" || cfg.tlsFile != "" {
+		tlsOn = &turnagent.TLS{Now: attest.WallClock}
+		if cfg.tlsSecretID != "" {
+			a, err := awsx.Load(ctx, cfg.region)
+			if err != nil {
+				return fmt.Errorf("AWS configuration: %w", err)
+			}
+			s := awsx.NewSecret(a, cfg.tlsSecretID)
+			s.MaxSize = tlscert.MaxDocument
+			tlsOn.Source = s
+		} else {
+			tlsOn.Source = tlsFileSource(cfg.tlsFile)
+		}
+		switch {
+		case cfg.statusParam != "":
+			a, err := awsx.Load(ctx, cfg.region)
+			if err != nil {
+				return fmt.Errorf("AWS configuration: %w", err)
+			}
+			tlsOn.Status = awsx.NewParameter(a, cfg.statusParam)
+		case cfg.statusFile != "":
+			tlsOn.Status = turnsstatus.File(cfg.statusFile)
+		}
+	}
+	logger.Info("turn-agent started", "version", buildVersion(), "realm", cfg.params.Realm, "secrets", cfg.secrets, "metrics", cfg.metrics,
+		"tls", tlsOn != nil)
 	a := &turnagent.Agent{
 		Params:  cfg.params,
 		Secrets: &secretsrc.Holder{Source: src, Now: attest.WallClock},
@@ -219,8 +269,26 @@ func run(ctx context.Context, cfg config) error {
 		Start:   turnagent.ExecStarter(cfg.turnserver),
 		Scrape:  turnagent.HTTPScraper(promPort(cfg.params)),
 		Log:     logger,
+		TLS:     tlsOn,
 	}
 	return a.Run(ctx)
+}
+
+// tlsFileSource reads the certificate's document from a file
+// (self-hosting, development), up to tlscert.MaxDocument.
+type tlsFileSource string
+
+func (f tlsFileSource) Get(context.Context) ([]byte, error) {
+	b, err := os.ReadFile(string(f))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, secretsrc.ErrNotFound
+	case err != nil:
+		return nil, errors.New("reading the TLS file failed")
+	case len(b) > tlscert.MaxDocument:
+		return nil, errors.New("the TLS file is too large")
+	}
+	return b, nil
 }
 
 func promPort(p turnagent.Params) int {

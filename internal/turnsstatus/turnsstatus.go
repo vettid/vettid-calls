@@ -227,6 +227,19 @@ func (f File) Get(context.Context) ([]byte, error) {
 	return b, nil
 }
 
+// Put writes the value to the file (turnagent.StatusPutter), replacing it
+// whole.
+func (f File) Put(_ context.Context, value []byte) error {
+	tmp := string(f) + ".tmp"
+	if err := os.WriteFile(tmp, value, 0o644); err != nil {
+		return errors.New("turnsstatus: writing the status file failed")
+	}
+	if err := os.Rename(tmp, string(f)); err != nil {
+		return errors.New("turnsstatus: writing the status file failed")
+	}
+	return nil
+}
+
 // Static is a fixed value (tests, self-hosting without a parameter).
 type Static []byte
 

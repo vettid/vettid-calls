@@ -34,6 +34,16 @@ func TestLoad(t *testing.T) {
 		"bad host":        func(m map[string]string) { m["CALLS_TURN_HOST"] = "Turn Server" },
 		"capacity < cap":  func(m map[string]string) { m["CALLS_CAPACITY_KBPS"] = "10" },
 		"metrics unknown": func(m map[string]string) { m["CALLS_METRICS"] = "statsd" },
+		"two TLS sources": func(m map[string]string) {
+			m["CALLS_TLS_SECRET_ID"] = "vettid-org/staging/calls/tls-cert"
+			m["CALLS_TLS_FILE"] = "/etc/tls.json"
+		},
+		"status without TLS": func(m map[string]string) { m["CALLS_TURNS_STATUS"] = "/vettid-org/staging/calls/turns-status" },
+		"two statuses": func(m map[string]string) {
+			m["CALLS_TLS_FILE"] = "/etc/tls.json"
+			m["CALLS_TURNS_STATUS"] = "/vettid-org/staging/calls/turns-status"
+			m["CALLS_TURNS_STATUS_FILE"] = "/run/status"
+		},
 	} {
 		m := base()
 		mut(m)
@@ -42,5 +52,18 @@ func TestLoad(t *testing.T) {
 		} else if strings.Contains(err.Error(), "REDACTED") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+func TestLoadTLS(t *testing.T) {
+	m := base()
+	m["CALLS_TLS_SECRET_ID"] = "vettid-org/staging/calls/tls-cert"
+	m["CALLS_TURNS_STATUS"] = "/vettid-org/staging/calls/turns-status"
+	c, err := load(env(m))
+	if err != nil || c.tlsSecretID == "" || c.statusParam == "" {
+		t.Fatalf("%v %+v", err, c)
+	}
+	if c, err = load(env(base())); err != nil || c.tlsSecretID != "" || c.tlsFile != "" {
+		t.Fatalf("TLS off by default: %v %+v", err, c)
 	}
 }

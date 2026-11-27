@@ -39,6 +39,9 @@ func Load(ctx context.Context, region string) (aws.Config, error) {
 type Secret struct {
 	Client *secretsmanager.Client
 	ID     string
+	// MaxSize bounds the value (default turncred.MaxDocument; the TLS
+	// certificate's document is tlscert.MaxDocument).
+	MaxSize int
 }
 
 // NewSecret returns the Secrets Manager source of secret id.
@@ -63,7 +66,11 @@ func (s *Secret) Get(ctx context.Context) ([]byte, error) {
 	} else {
 		b = out.SecretBinary
 	}
-	if len(b) == 0 || len(b) > turncred.MaxDocument {
+	max := s.MaxSize
+	if max == 0 {
+		max = turncred.MaxDocument
+	}
+	if len(b) == 0 || len(b) > max {
 		return nil, fmt.Errorf("awsx: secret %s is empty or too large", s.ID)
 	}
 	return b, nil
@@ -97,6 +104,18 @@ func (p *Parameter) Get(ctx context.Context) ([]byte, error) {
 		return nil, turnsstatus.ErrNotFound
 	}
 	return []byte(*out.Parameter.Value), nil
+}
+
+// Put implements turnagent.StatusPutter: it overwrites the parameter's
+// value (the stack makes the parameter, a String; the instance's role may
+// put only it).
+func (p *Parameter) Put(ctx context.Context, value []byte) error {
+	_, err := p.Client.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(p.Name), Value: aws.String(string(value)),
+		Overwrite: aws.Bool(true)})
+	if err != nil {
+		return fmt.Errorf("awsx: putting parameter %s failed", p.Name)
+	}
+	return nil
 }
 
 // CloudWatch puts metrics with PutMetricData (metrics.Sink). Standard

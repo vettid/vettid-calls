@@ -91,6 +91,8 @@ type Agent struct {
 	// killed (default 10 s).
 	StopTimeout time.Duration
 	Log         *slog.Logger
+	// TLS, if set, is TURN over TLS on 443 (CALLING-SERVICE 0.3.0 §8.5).
+	TLS *TLS
 
 	logs      LogCounter
 	mu        sync.Mutex
@@ -113,6 +115,7 @@ func (a *Agent) fail(kind string, err error) {
 func (a *Agent) writeConf(set *turncred.Set) (string, error) {
 	p := a.Params
 	p.Secrets = set.Ordered()
+	p.TLS = a.tlsFiles()
 	b, err := Render(p)
 	if err != nil {
 		return "", err
@@ -129,9 +132,11 @@ func (a *Agent) writeConf(set *turncred.Set) (string, error) {
 }
 
 type running struct {
-	proc Process
-	done chan struct{}
-	pw   *io.PipeWriter
+	proc   Process
+	done   chan struct{}
+	pw     *io.PipeWriter
+	tls    bool // started with TLS on 443
+	promUp bool // has answered on its Prometheus port since it started
 }
 
 func (a *Agent) start(conf string) (*running, error) {
@@ -142,7 +147,11 @@ func (a *Agent) start(conf string) (*running, error) {
 		pw.Close()
 		return nil, err
 	}
-	r := &running{proc: proc, done: make(chan struct{}), pw: pw}
+	r := &running{proc: proc, done: make(chan struct{}), pw: pw, tls: a.tlsFiles() != nil}
+	if t := a.TLS; t != nil {
+		// A new coturn reads the files as they are: no reload waits.
+		t.pending, t.prevLeaf, t.prevOK, t.reloadAt = false, nil, false, time.Time{}
+	}
 	go func() {
 		_ = proc.Wait()
 		pw.Close()
@@ -206,6 +215,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.Metrics.Count("coturn_restarts", a.dims("reason", reason))
 		}
 	}
+	if a.TLS != nil {
+		a.tlsLoad(ctx, false)
+	}
 	ensure("")
 	for {
 		var done chan struct{}
@@ -214,7 +226,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		select {
 		case <-ctx.Done():
-			a.report(ctx, cur != nil)
+			a.report(ctx, cur)
 			return nil
 		case <-done:
 			cur = nil
@@ -236,18 +248,28 @@ func (a *Agent) Run(ctx context.Context) error {
 					ensure("secret")
 				}
 			}
-			a.report(ctx, cur != nil)
+			if a.TLS != nil {
+				if reason := a.tlsStep(ctx, cur); reason != "" {
+					// Switching TLS on or off, or a reload that did not
+					// take: a restart, which ends the relayed calls.
+					a.stop(cur)
+					cur = nil
+					ensure(reason)
+				}
+			}
+			a.report(ctx, cur)
 		}
 	}
 }
 
 // report scrapes coturn and puts one interval's metrics.
-func (a *Agent) report(ctx context.Context, up bool) {
-	if up && a.Scrape != nil && ctx.Err() == nil {
+func (a *Agent) report(ctx context.Context, cur *running) {
+	if cur != nil && a.Scrape != nil && ctx.Err() == nil {
 		s, err := a.Scrape(ctx)
 		if err != nil {
 			a.fail("scrape", err)
 		} else {
+			cur.promUp = true
 			a.mu.Lock()
 			a.lastAlloc = s.Allocations
 			prev := a.prev
