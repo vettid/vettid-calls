@@ -35,12 +35,24 @@ const (
 	RefreshInterval = 10 * time.Minute
 	// RetryInterval is the least time between two failed reads.
 	RetryInterval = time.Minute
+	// ReadTimeout bounds a read: it is made on a request's path, and a
+	// call never waits long for the issuer (§5.4).
+	ReadTimeout = time.Second
 
 	maxInt = 1 << 53
 )
 
 // ErrNotFound is a status the source does not have.
 var ErrNotFound = errors.New("turnsstatus: not found")
+
+// The outcomes of a read, as Holder.Report gets them.
+const (
+	OutcomeOK        = "ok"        // a value that parses
+	OutcomeMissing   = "missing"   // no value: not verified
+	OutcomeMalformed = "malformed" // a value that does not parse: not verified
+	OutcomeFuture    = "future"    // verified_at more than MaxAhead ahead: refused, not verified
+	OutcomeError     = "error"     // the read failed: the last status is kept
+)
 
 // Status is the value. The zero Status is "not verified".
 type Status struct {
@@ -123,17 +135,18 @@ type Source interface {
 // on).
 //
 // A read that answers settles the status: a value that parses is it;
-// one that is missing (ErrNotFound) or does not parse is "not verified".
-// A read that fails keeps the last status.
+// one that is missing (ErrNotFound), does not parse, or is verified more
+// than MaxAhead ahead of the clock is "not verified" (a future value is
+// refused, not kept until the clock catches up). A read that fails keeps
+// the last status.
 type Holder struct {
 	Source Source
 	// Now is the clock (default: the wall clock without its monotonic
 	// reading).
 	Now func() time.Time
-	// Report, if set, is told the outcome of every read: the status held
-	// after it, and the read's error (nil when it answered, even with a
-	// malformed value; then malformed is true).
-	Report func(st Status, malformed bool, err error)
+	// Report, if set, is told every read: the status held after it, the
+	// outcome (Outcome*), and the error of a failed read.
+	Report func(st Status, outcome string, err error)
 
 	mu          sync.Mutex
 	st          Status
@@ -164,24 +177,28 @@ func (h *Holder) Get(ctx context.Context) Status {
 
 func (h *Holder) loadLocked(ctx context.Context, now time.Time) {
 	h.lastAttempt = now
-	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	rctx, cancel := context.WithTimeout(ctx, ReadTimeout)
 	defer cancel()
 	b, err := h.Source.Get(rctx)
-	malformed := false
+	outcome := OutcomeOK
 	switch {
 	case errors.Is(err, ErrNotFound):
-		h.st, h.loaded, err = Status{}, now, nil
+		h.st, h.loaded, err, outcome = Status{}, now, nil, OutcomeMissing
 	case err != nil:
 		// Kept: the last status, still aged by Fresh.
+		outcome = OutcomeError
 	default:
 		st, perr := Parse(b)
-		if perr != nil {
-			st, malformed = Status{}, true
+		switch {
+		case perr != nil:
+			st, outcome = Status{}, OutcomeMalformed
+		case time.Unix(st.VerifiedAt, 0).Sub(now) > MaxAhead:
+			st, outcome = Status{}, OutcomeFuture
 		}
 		h.st, h.loaded = st, now
 	}
 	if h.Report != nil {
-		h.Report(h.st, malformed, err)
+		h.Report(h.st, outcome, err)
 	}
 }
 

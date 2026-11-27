@@ -248,7 +248,8 @@ func (s *Server) handle(r *http.Request) (*Answer, *apiError) {
 		s.logError("secret", "no TURN secret is available")
 		return nil, fail(CodeInternal)
 	}
-	ans := &Answer{STUN: s.stun, TURN: s.turnURLs(r.Context(), now), Credentials: make([]turncred.Credential, 0, count)}
+	urls, listed := s.turnURLs(r.Context(), now)
+	ans := &Answer{STUN: s.stun, TURN: urls, Credentials: make([]turncred.Credential, 0, count)}
 	for i := 0; i < count; i++ {
 		c, err := turncred.Make(set.CurrentSecret(), now, s.cfg.Lifetime, s.cfg.Rand)
 		if err != nil {
@@ -257,22 +258,26 @@ func (s *Server) handle(r *http.Request) (*Answer, *apiError) {
 		}
 		ans.Credentials = append(ans.Credentials, c)
 	}
+	// Put for answers only: an internal error leaves no sample.
+	if s.cfg.TURNS != nil {
+		v := 0.0
+		if listed {
+			v = 1
+		}
+		s.cfg.Metrics.Set("turns_listed", "Count", v)
+	}
 	return ans, nil
 }
 
 // turnURLs is the answer's TURN URLs: the turns: URL too while TLS is
-// switched on and the server's status is fresh at now (§8.5). The status
-// never fails a request; turns_listed says which way each answer went.
-func (s *Server) turnURLs(ctx context.Context, now time.Time) []string {
-	if s.cfg.TURNS == nil {
-		return s.turn
+// switched on and the server's status is fresh at now (§8.5), and whether
+// it is listed. The status never fails a request; turns_listed says which
+// way each answer went.
+func (s *Server) turnURLs(ctx context.Context, now time.Time) ([]string, bool) {
+	if s.cfg.TURNS == nil || !s.cfg.TURNS.Get(ctx).Fresh(now) {
+		return s.turn, false
 	}
-	if !s.cfg.TURNS.Get(ctx).Fresh(now) {
-		s.cfg.Metrics.Set("turns_listed", "Count", 0)
-		return s.turn
-	}
-	s.cfg.Metrics.Set("turns_listed", "Count", 1)
-	return append(slices.Clip(s.turn), s.turns)
+	return append(slices.Clip(s.turn), s.turns), true
 }
 
 // parseBody accepts exactly {"count": n} with an integer 1 ≤ n ≤ 4: no

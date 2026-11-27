@@ -234,8 +234,10 @@ after the last successful refresh.
 Metrics: `requests{outcome}`, `attestation_failures{reason}`,
 `manifest_refresh{outcome}`, `internal_errors`, and (beyond §10)
 `secret_refresh{outcome}`; while TLS is on (0.3.0 §8.5), `turns_listed`
-(1 or 0, at each answer), `turns_status_refresh{outcome}` (`ok`,
-`malformed`, `error`) and `turns_status_age` (seconds, at each read);
+(1 or 0, set at each answer and put as the last value of the minute: a
+gauge, not a count), `turns_status_refresh{outcome}` (`ok`, `missing`,
+`malformed`, `future`, `error`) and `turns_status_age` (seconds, at each
+read);
 every value from a closed set. In Lambda they
 are put with PutMetricData after each request (standard resolution, so
 CloudWatch keeps them per minute); as a server, EMF lines once a minute.

@@ -184,16 +184,15 @@ func run(ctx context.Context, cfg config.Config, d deps) error {
 		tsrc = turnsstatus.File(cfg.TURNSStatusFile)
 	}
 	if tsrc != nil {
-		turns = &turnsstatus.Holder{Source: tsrc, Report: func(st turnsstatus.Status, malformed bool, err error) {
-			outcome := "ok"
-			switch {
-			case err != nil:
-				outcome = "error"
-				if srv != nil {
-					srv.LogError("turns_status", "reading the TURN server's TLS status failed", "error", err.Error())
+		turns = &turnsstatus.Holder{Source: tsrc, Report: func(st turnsstatus.Status, outcome string, err error) {
+			if outcome != turnsstatus.OutcomeOK && srv != nil {
+				// At most once a minute per kind; the error names the
+				// parameter, never a value.
+				msg := "the TURN server's TLS status is " + outcome
+				if err != nil {
+					msg = "reading the TURN server's TLS status failed: " + err.Error()
 				}
-			case malformed:
-				outcome = "malformed"
+				srv.LogError("turns_status_"+outcome, msg)
 			}
 			reg.Count("turns_status_refresh", metrics.Dim{Name: "outcome", Value: outcome})
 			if st.VerifiedAt > 0 {

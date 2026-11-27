@@ -77,9 +77,11 @@ type Parameter struct {
 	Name   string
 }
 
-// NewParameter returns the SSM source of parameter name.
+// NewParameter returns the SSM source of parameter name. One attempt per
+// read, no SDK retries: the read is on a request's path, bounded by
+// turnsstatus.ReadTimeout, and a failed read keeps the last status.
 func NewParameter(cfg aws.Config, name string) *Parameter {
-	return &Parameter{Client: ssm.NewFromConfig(cfg), Name: name}
+	return &Parameter{Client: ssm.NewFromConfig(cfg, func(o *ssm.Options) { o.RetryMaxAttempts = 1 }), Name: name}
 }
 
 // Get implements turnsstatus.Source. Errors name the parameter.
@@ -142,6 +144,10 @@ func unit(u string) cwtypes.StandardUnit {
 		return cwtypes.StandardUnitCount
 	case "Bytes":
 		return cwtypes.StandardUnitBytes
+	case "Seconds":
+		return cwtypes.StandardUnitSeconds
+	case "Percent":
+		return cwtypes.StandardUnitPercent
 	default:
 		return cwtypes.StandardUnitNone
 	}

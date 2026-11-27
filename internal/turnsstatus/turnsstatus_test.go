@@ -37,6 +37,7 @@ func TestParse(t *testing.T) {
 		`{"verified_at":-1,"not_after":2}`,
 		`{"verified_at":9007199254740993,"not_after":2}`,
 		`{"verified_at":true,"not_after":2}`,
+		`{"verified_at":1,"x":2}`,
 		`{"verified_at":1,"not_after":2` + strings.Repeat(" ", MaxSize) + `}`,
 	}
 	for _, in := range bad {
@@ -96,8 +97,8 @@ func TestHolder(t *testing.T) {
 	good := Status{now.Unix(), now.Add(time.Hour).Unix()}
 	s := &src{b: good.Encode()}
 	var reports int
-	var lastMalformed bool
-	h := &Holder{Source: s, Now: clock, Report: func(_ Status, m bool, _ error) { reports++; lastMalformed = m }}
+	var last string
+	h := &Holder{Source: s, Now: clock, Report: func(_ Status, o string, _ error) { reports++; last = o }}
 	ctx := context.Background()
 
 	if h.Get(ctx) != good || s.calls != 1 {
@@ -128,8 +129,8 @@ func TestHolder(t *testing.T) {
 	// A malformed value is "not verified", not "keep".
 	s.err, s.b = nil, []byte(`{"verified_at":1}`)
 	now = now.Add(time.Minute)
-	if h.Get(ctx) != (Status{}) || !lastMalformed {
-		t.Fatal("a malformed value was kept or not reported")
+	if h.Get(ctx) != (Status{}) || last != OutcomeMalformed {
+		t.Fatal("a malformed value was kept or not reported", last)
 	}
 	// Missing is "not verified".
 	s.b, s.err = good.Encode(), nil
@@ -139,8 +140,8 @@ func TestHolder(t *testing.T) {
 	}
 	s.err = ErrNotFound
 	now = now.Add(11 * time.Minute)
-	if h.Get(ctx) != (Status{}) {
-		t.Fatal("a missing status was kept")
+	if h.Get(ctx) != (Status{}) || last != OutcomeMissing {
+		t.Fatal("a missing status was kept", last)
 	}
 	if reports != s.calls {
 		t.Fatalf("reports %d, reads %d", reports, s.calls)
@@ -153,3 +154,54 @@ func TestHolderFirstReadFails(t *testing.T) {
 		t.Fatal("verified without a read")
 	}
 }
+
+// A verified_at more than MaxAhead ahead is refused when read, not kept
+// until the clock catches up with it (a value 20 minutes ahead would
+// otherwise be listed from +15 to +44 minutes).
+func TestHolderFuture(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	now := t0
+	future := Status{VerifiedAt: t0.Add(20 * time.Minute).Unix(), NotAfter: t0.Add(48 * time.Hour).Unix()}
+	var last string
+	s := &src{b: future.Encode()}
+	h := &Holder{Source: s, Now: func() time.Time { return now }, Report: func(_ Status, o string, _ error) { last = o }}
+	if h.Get(context.Background()) != (Status{}) || last != OutcomeFuture {
+		t.Fatal("a future value was stored", last)
+	}
+	// Later reads fail, so whatever was stored is kept: nothing is listed
+	// as the clock passes the value's time.
+	s.err = errors.New("network")
+	for _, d := range []time.Duration{15 * time.Minute, 20 * time.Minute, 30 * time.Minute, 44 * time.Minute} {
+		now = t0.Add(d)
+		if h.Get(context.Background()).Fresh(now) {
+			t.Fatalf("listed at +%v", d)
+		}
+	}
+}
+
+// A clock that goes back: the next read is not held off for ever.
+func TestHolderClockBack(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	s := &src{b: Status{VerifiedAt: now.Unix(), NotAfter: now.Add(time.Hour).Unix()}.Encode()}
+	h := &Holder{Source: s, Now: func() time.Time { return now }}
+	h.Get(context.Background())
+	now = now.Add(-time.Hour)
+	h.Get(context.Background())
+	if s.calls != 2 {
+		t.Fatalf("not read again after the clock went back: %d reads", s.calls)
+	}
+}
+
+// A source that blocks is cut at ReadTimeout.
+func TestHolderReadTimeout(t *testing.T) {
+	h := &Holder{Source: blockingSource{}}
+	start := time.Now()
+	h.Get(context.Background())
+	if d := time.Since(start); d < ReadTimeout || d > ReadTimeout+500*time.Millisecond {
+		t.Fatalf("read took %v", d)
+	}
+}
+
+type blockingSource struct{}
+
+func (blockingSource) Get(ctx context.Context) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }
