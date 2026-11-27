@@ -24,6 +24,7 @@ import (
 	"github.com/vettid/vettid-calls/internal/metrics"
 	"github.com/vettid/vettid-calls/internal/secretsrc"
 	"github.com/vettid/vettid-calls/internal/turncred"
+	"github.com/vettid/vettid-calls/internal/turnsstatus"
 )
 
 // deps are run's connections to the outside, replaced in tests.
@@ -43,6 +44,8 @@ type deps struct {
 	lambdaStart func(any)
 	// ready, if set, is called with the server once it is serving.
 	ready func(*issuer.Server)
+	// turnsStatus, if set, replaces the configured TLS status source (tests).
+	turnsStatus turnsstatus.Source
 }
 
 func newLogger(w io.Writer, level string) *slog.Logger {
@@ -114,7 +117,7 @@ func run(ctx context.Context, cfg config.Config, d deps) error {
 	reg := metrics.New(cfg.MetricsNamespace, attest.WallClock)
 
 	var awsCfg aws.Config
-	needAWS := cfg.Secrets == config.SecretsAWS || (cfg.Metrics == config.MetricsCloudWatch && d.sink == nil)
+	needAWS := cfg.Secrets == config.SecretsAWS || cfg.TURNSStatus != "" || (cfg.Metrics == config.MetricsCloudWatch && d.sink == nil)
 	if needAWS {
 		a, err := awsx.Load(ctx, cfg.Region)
 		if err != nil {
@@ -168,6 +171,37 @@ func run(ctx context.Context, cfg config.Config, d deps) error {
 		reg.Count("secret_refresh", metrics.Dim{Name: "outcome", Value: outcome})
 	}}
 
+	// The server's TLS status (§8.5), only while TLS is switched on. It
+	// is read with the secret, and its age is put at each read.
+	var turns *turnsstatus.Holder
+	var tsrc turnsstatus.Source
+	switch {
+	case d.turnsStatus != nil:
+		tsrc = d.turnsStatus
+	case cfg.TURNSStatus != "":
+		tsrc = awsx.NewParameter(awsCfg, cfg.TURNSStatus)
+	case cfg.TURNSStatusFile != "":
+		tsrc = turnsstatus.File(cfg.TURNSStatusFile)
+	}
+	if tsrc != nil {
+		turns = &turnsstatus.Holder{Source: tsrc, Report: func(st turnsstatus.Status, malformed bool, err error) {
+			outcome := "ok"
+			switch {
+			case err != nil:
+				outcome = "error"
+				if srv != nil {
+					srv.LogError("turns_status", "reading the TURN server's TLS status failed", "error", err.Error())
+				}
+			case malformed:
+				outcome = "malformed"
+			}
+			reg.Count("turns_status_refresh", metrics.Dim{Name: "outcome", Value: outcome})
+			if st.VerifiedAt > 0 {
+				reg.Set("turns_status_age", "Seconds", time.Since(time.Unix(st.VerifiedAt, 0)).Seconds())
+			}
+		}}
+	}
+
 	// The attestation verifier.
 	verifier := &attest.Verifier{Roots: attest.NitroRoots(), Now: attest.WallClock}
 	if d.roots != nil {
@@ -199,7 +233,7 @@ func run(ctx context.Context, cfg config.Config, d deps) error {
 	}
 
 	var err error
-	srv, err = issuer.New(issuer.Config{Attest: verifier, Manifest: lazy, Secrets: holder, TURNHost: cfg.TURNHost,
+	srv, err = issuer.New(issuer.Config{Attest: verifier, Manifest: lazy, Secrets: holder, TURNHost: cfg.TURNHost, TURNS: turns,
 		MaxInFlight: cfg.MaxInFlight, Metrics: reg, Log: logger, Now: attest.WallClock})
 	if err != nil {
 		return err
@@ -210,7 +244,7 @@ func run(ctx context.Context, cfg config.Config, d deps) error {
 	}
 	// The one start line: nothing secret, nothing of a request.
 	logger.Info("vettid-calls started", "version", buildVersion(), "channel", cfg.Channel, "mode", mode,
-		"turn_host", cfg.TURNHost, "max_inflight", cfg.MaxInFlight, "secrets", cfg.Secrets, "metrics", cfg.Metrics, "dev", cfg.Dev)
+		"turn_host", cfg.TURNHost, "turns", turns != nil, "max_inflight", cfg.MaxInFlight, "secrets", cfg.Secrets, "metrics", cfg.Metrics, "dev", cfg.Dev)
 	srv.Warm(ctx)
 	if d.ready != nil {
 		d.ready(srv)

@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/vettid/vettid-calls/internal/metrics"
 	"github.com/vettid/vettid-calls/internal/secretsrc"
 	"github.com/vettid/vettid-calls/internal/turncred"
+	"github.com/vettid/vettid-calls/internal/turnsstatus"
 )
 
 // Paths.
@@ -53,6 +55,9 @@ const DefaultMaxInFlight = 4
 // TURNPort is the port of STUN and TURN (§4.3).
 const TURNPort = 3478
 
+// TURNSPort is the port of TURN over TLS (0.3.0 §7.2, §8.5).
+const TURNSPort = 443
+
 // Config configures a Server.
 type Config struct {
 	// Attest verifies the attestation (step 2).
@@ -65,6 +70,10 @@ type Config struct {
 	Secrets *secretsrc.Holder
 	// TURNHost is the TURN/STUN server's name (turn.staging.vettid.org).
 	TURNHost string
+	// TURNS, if set, is the server's TLS status (0.3.0 §8.5): TLS is
+	// switched on, and an answer lists the turns: URL while the status
+	// is fresh. Nil: TLS is off and no answer lists it.
+	TURNS *turnsstatus.Holder
 	// MaxInFlight bounds the requests handled at once (§7.5).
 	MaxInFlight int
 	// Lifetime of a credential (default turncred.Lifetime, D14).
@@ -83,6 +92,7 @@ type Server struct {
 	inflight chan struct{}
 	stun     []string
 	turn     []string
+	turns    string
 
 	logMu   sync.Mutex
 	logLast map[string]time.Time
@@ -126,6 +136,7 @@ func New(cfg Config) (*Server, error) {
 	return &Server{cfg: cfg, inflight: make(chan struct{}, cfg.MaxInFlight),
 		stun:    []string{"stun:" + hp},
 		turn:    []string{"turn:" + hp + "?transport=udp", "turn:" + hp + "?transport=tcp"},
+		turns:   "turns:" + net.JoinHostPort(cfg.TURNHost, strconv.Itoa(TURNSPort)) + "?transport=tcp",
 		logLast: map[string]time.Time{}, logSkip: map[string]int{}}, nil
 }
 
@@ -237,7 +248,7 @@ func (s *Server) handle(r *http.Request) (*Answer, *apiError) {
 		s.logError("secret", "no TURN secret is available")
 		return nil, fail(CodeInternal)
 	}
-	ans := &Answer{STUN: s.stun, TURN: s.turn, Credentials: make([]turncred.Credential, 0, count)}
+	ans := &Answer{STUN: s.stun, TURN: s.turnURLs(r.Context(), now), Credentials: make([]turncred.Credential, 0, count)}
 	for i := 0; i < count; i++ {
 		c, err := turncred.Make(set.CurrentSecret(), now, s.cfg.Lifetime, s.cfg.Rand)
 		if err != nil {
@@ -247,6 +258,21 @@ func (s *Server) handle(r *http.Request) (*Answer, *apiError) {
 		ans.Credentials = append(ans.Credentials, c)
 	}
 	return ans, nil
+}
+
+// turnURLs is the answer's TURN URLs: the turns: URL too while TLS is
+// switched on and the server's status is fresh at now (§8.5). The status
+// never fails a request; turns_listed says which way each answer went.
+func (s *Server) turnURLs(ctx context.Context, now time.Time) []string {
+	if s.cfg.TURNS == nil {
+		return s.turn
+	}
+	if !s.cfg.TURNS.Get(ctx).Fresh(now) {
+		s.cfg.Metrics.Set("turns_listed", "Count", 0)
+		return s.turn
+	}
+	s.cfg.Metrics.Set("turns_listed", "Count", 1)
+	return append(slices.Clip(s.turn), s.turns)
 }
 
 // parseBody accepts exactly {"count": n} with an integer 1 ≤ n ≤ 4: no
@@ -289,11 +315,14 @@ func (s *Server) logError(kind, msg string, attrs ...any) {
 // LogError is logError for the binary (refresh failures).
 func (s *Server) LogError(kind, msg string, attrs ...any) { s.logError(kind, msg, attrs...) }
 
-// Warm loads the secret and the manifest before the first request, so a
+// Warm loads the secret, the manifest and the TLS status before the first request, so a
 // cold start does not pay for both on the request path. Failures are
 // reported through the holders' Report hooks.
 func (s *Server) Warm(ctx context.Context) {
 	_ = s.cfg.Secrets.Get(ctx)
+	if s.cfg.TURNS != nil {
+		_ = s.cfg.TURNS.Get(ctx)
+	}
 	if s.cfg.Manifest != nil {
 		s.cfg.Manifest.Ensure(ctx)
 	}

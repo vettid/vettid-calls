@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
 	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.73.3
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.50.4
+	github.com/aws/aws-sdk-go-v2/service/ssm v1.79.3
 	github.com/vettid/vettid-relay v0.0.0-20261004125620-d3a1b451d21e
 	github.com/vettid/vettid-vault v0.0.0-20261010231811-f6614b97e069
 )

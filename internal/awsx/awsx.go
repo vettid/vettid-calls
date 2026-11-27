@@ -1,6 +1,6 @@
 // Package awsx is this repository's use of AWS: reading the TURN secret
-// from Secrets Manager (CALLING-SERVICE §8.3) and putting metrics into
-// CloudWatch (§10). Both binaries use it: the issuer with its function
+// from Secrets Manager (CALLING-SERVICE §8.3), reading the TURN server's
+// TLS status from SSM (§8.5) and putting metrics into CloudWatch (§10). Both binaries use it: the issuer with its function
 // role, turn-agent with the instance role.
 //
 // The secret is encrypted under alias/vettid-org-calls; Secrets Manager
@@ -20,10 +20,13 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/vettid/vettid-calls/internal/metrics"
 	"github.com/vettid/vettid-calls/internal/secretsrc"
 	"github.com/vettid/vettid-calls/internal/turncred"
+	"github.com/vettid/vettid-calls/internal/turnsstatus"
 )
 
 // Load returns the SDK configuration from the standard chain (the
@@ -64,6 +67,34 @@ func (s *Secret) Get(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("awsx: secret %s is empty or too large", s.ID)
 	}
 	return b, nil
+}
+
+// Parameter reads one SSM parameter by name: the TURN server's TLS status
+// (CALLING-SERVICE 0.3.0 §8.5, turnsstatus.Source). It is a String, not
+// a secret, so it is read without decryption.
+type Parameter struct {
+	Client *ssm.Client
+	Name   string
+}
+
+// NewParameter returns the SSM source of parameter name.
+func NewParameter(cfg aws.Config, name string) *Parameter {
+	return &Parameter{Client: ssm.NewFromConfig(cfg), Name: name}
+}
+
+// Get implements turnsstatus.Source. Errors name the parameter.
+func (p *Parameter) Get(ctx context.Context) ([]byte, error) {
+	out, err := p.Client.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(p.Name)})
+	var nf *ssmtypes.ParameterNotFound
+	switch {
+	case errors.As(err, &nf):
+		return nil, turnsstatus.ErrNotFound
+	case err != nil:
+		return nil, fmt.Errorf("awsx: reading parameter %s failed", p.Name)
+	case out.Parameter == nil || out.Parameter.Value == nil:
+		return nil, turnsstatus.ErrNotFound
+	}
+	return []byte(*out.Parameter.Value), nil
 }
 
 // CloudWatch puts metrics with PutMetricData (metrics.Sink). Standard
