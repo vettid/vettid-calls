@@ -3,6 +3,7 @@ package turnsstatus
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -155,9 +156,9 @@ func TestHolderFirstReadFails(t *testing.T) {
 	}
 }
 
-// A verified_at more than MaxAhead ahead is refused when read, not kept
-// until the clock catches up with it (a value 20 minutes ahead would
-// otherwise be listed from +15 to +44 minutes).
+// A verified_at more than MaxAhead ahead is refused while it is that far
+// ahead: not stored to become fresh later without a read (a value 20
+// minutes ahead would otherwise be listed from +15 to +44 minutes).
 func TestHolderFuture(t *testing.T) {
 	t0 := time.Unix(1_800_000_000, 0)
 	now := t0
@@ -197,7 +198,8 @@ func TestHolderReadTimeout(t *testing.T) {
 	h := &Holder{Source: blockingSource{}}
 	start := time.Now()
 	h.Get(context.Background())
-	if d := time.Since(start); d < ReadTimeout || d > ReadTimeout+500*time.Millisecond {
+	// Literal bounds: a longer ReadTimeout fails this, not only a broken cut.
+	if d := time.Since(start); d < 900*time.Millisecond || d > 1500*time.Millisecond {
 		t.Fatalf("read took %v", d)
 	}
 }
@@ -205,3 +207,67 @@ func TestHolderReadTimeout(t *testing.T) {
 type blockingSource struct{}
 
 func (blockingSource) Get(ctx context.Context) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }
+
+// As it is: a value refused while far ahead is accepted by a later read
+// that finds it within MaxAhead (the issuer keeps no state to tell; the
+// writer's clock is the guard).
+func TestHolderFutureReRead(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	now := t0
+	future := Status{VerifiedAt: t0.Add(20 * time.Minute).Unix(), NotAfter: t0.Add(48 * time.Hour).Unix()}
+	var last string
+	h := &Holder{Source: &src{b: future.Encode()}, Now: func() time.Time { return now },
+		Report: func(_ Status, o string, _ error) { last = o }}
+	for _, c := range []struct {
+		at      time.Duration
+		outcome string
+		listed  bool
+	}{
+		{0, OutcomeFuture, false},
+		{10 * time.Minute, OutcomeFuture, false},
+		{20 * time.Minute, OutcomeOK, true},
+		{44 * time.Minute, OutcomeOK, true},
+		{46 * time.Minute, OutcomeOK, false},
+	} {
+		now = t0.Add(c.at)
+		h.loaded = time.Time{} // read each time
+		st := h.Get(context.Background())
+		if last != c.outcome || st.Fresh(now) != c.listed {
+			t.Errorf("+%v: %s, listed %v", c.at, last, st.Fresh(now))
+		}
+	}
+}
+
+// The MaxAhead boundary when read: exactly 5 minutes ahead is ok, a
+// second more is future.
+func TestHolderAheadBoundary(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	for ahead, want := range map[time.Duration]string{MaxAhead: OutcomeOK, MaxAhead + time.Second: OutcomeFuture} {
+		var last string
+		v := Status{VerifiedAt: now.Add(ahead).Unix(), NotAfter: now.Add(time.Hour).Unix()}
+		h := &Holder{Source: &src{b: v.Encode()}, Now: func() time.Time { return now },
+			Report: func(_ Status, o string, _ error) { last = o }}
+		h.Get(context.Background())
+		if last != want {
+			t.Errorf("%v ahead: %s, want %s", ahead, last, want)
+		}
+	}
+	if MaxAhead != 5*time.Minute || MaxAge != 25*time.Minute || ReadTimeout != time.Second {
+		t.Fatal("the §8.5 numbers changed")
+	}
+}
+
+// The file source reads at most MaxSize+1 bytes.
+func TestFileBounded(t *testing.T) {
+	p := t.TempDir() + "/status.json"
+	if err := os.WriteFile(p, []byte(strings.Repeat(" ", 10*MaxSize)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, err := File(p).Get(context.Background())
+	if err != nil || len(b) != MaxSize+1 {
+		t.Fatalf("%d bytes, %v", len(b), err)
+	}
+	if _, err := File(p + ".absent").Get(context.Background()); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
+	}
+}

@@ -143,3 +143,17 @@ func TestTURNSFirstReadFails(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// Warm reads the status before the first request.
+func TestTURNSWarm(t *testing.T) {
+	src := &countingStatus{}
+	h := newHarness(t, func(c *Config) { c.TURNS = &turnsstatus.Holder{Source: src} })
+	h.srv.Warm(context.Background())
+	if src.n != 1 {
+		t.Fatalf("%d reads at Warm", src.n)
+	}
+}
+
+type countingStatus struct{ n int }
+
+func (c *countingStatus) Get(context.Context) ([]byte, error) { c.n++; return nil, turnsstatus.ErrNotFound }

@@ -188,11 +188,11 @@ func run(ctx context.Context, cfg config.Config, d deps) error {
 			if outcome != turnsstatus.OutcomeOK && srv != nil {
 				// At most once a minute per kind; the error names the
 				// parameter, never a value.
-				msg := "the TURN server's TLS status is " + outcome
 				if err != nil {
-					msg = "reading the TURN server's TLS status failed: " + err.Error()
+					srv.LogError("turns_status_"+outcome, "reading the TURN server's TLS status failed", "error", err.Error())
+				} else {
+					srv.LogError("turns_status_"+outcome, "the TURN server's TLS status is "+outcome)
 				}
-				srv.LogError("turns_status_"+outcome, msg)
 			}
 			reg.Count("turns_status_refresh", metrics.Dim{Name: "outcome", Value: outcome})
 			if st.VerifiedAt > 0 {

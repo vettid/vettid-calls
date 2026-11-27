@@ -136,9 +136,12 @@ type Source interface {
 //
 // A read that answers settles the status: a value that parses is it;
 // one that is missing (ErrNotFound), does not parse, or is verified more
-// than MaxAhead ahead of the clock is "not verified" (a future value is
-// refused, not kept until the clock catches up). A read that fails keeps
-// the last status.
+// than MaxAhead ahead of the clock is "not verified". A future value is
+// refused while it is that far ahead: it is not stored to become fresh
+// later without a read. A later read that finds the same value within
+// MaxAhead accepts it; the issuer keeps no state to tell, and the
+// writer's clock is the real guard (turn-agent writes its own time). A
+// read that fails keeps the last status.
 type Holder struct {
 	Source Source
 	// Now is the clock (default: the wall clock without its monotonic
@@ -207,11 +210,18 @@ type File string
 
 // Get implements Source.
 func (f File) Get(context.Context) ([]byte, error) {
-	b, err := os.ReadFile(string(f))
-	switch {
-	case errors.Is(err, os.ErrNotExist):
+	fh, err := os.Open(string(f))
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotFound
-	case err != nil:
+	}
+	if err != nil {
+		return nil, errors.New("turnsstatus: reading the status file failed")
+	}
+	defer fh.Close()
+	// At most MaxSize+1 bytes: a larger file is malformed, and is not
+	// read whole.
+	b, err := io.ReadAll(io.LimitReader(fh, MaxSize+1))
+	if err != nil {
 		return nil, errors.New("turnsstatus: reading the status file failed")
 	}
 	return b, nil

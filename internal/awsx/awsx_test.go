@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
 	"github.com/vettid/vettid-calls/internal/turnsstatus"
@@ -55,5 +56,14 @@ func TestNewParameterNoRetries(t *testing.T) {
 	p := NewParameter(aws.Config{Region: "us-east-1"}, "/x")
 	if p.Client.Options().RetryMaxAttempts != 1 {
 		t.Fatal(p.Client.Options().RetryMaxAttempts)
+	}
+}
+
+func TestUnit(t *testing.T) {
+	for u, want := range map[string]cwtypes.StandardUnit{"Count": cwtypes.StandardUnitCount, "Bytes": cwtypes.StandardUnitBytes,
+		"Seconds": cwtypes.StandardUnitSeconds, "Percent": cwtypes.StandardUnitPercent, "": cwtypes.StandardUnitNone} {
+		if got := unit(u); got != want {
+			t.Errorf("%q: %v", u, got)
+		}
 	}
 }
