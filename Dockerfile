@@ -1,5 +1,5 @@
 # syntax=docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
-# VettID calling service: the TURN/STUN server image (CALLING-SERVICE 0.2.0
+# VettID calling service: the TURN/STUN server image (CALLING-SERVICE 0.3.0
 # §4.1, §4.4): coturn 4.18.0, pinned by digest, with turn-agent as the entry
 # point. turn-agent renders coturn's configuration (§7.2) from the secret,
 # runs coturn and turns its counters into metrics (§10).
@@ -38,5 +38,5 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 FROM docker.io/coturn/coturn:4.18.0-r0@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
 COPY --from=build /out/turn-agent /usr/local/bin/turn-agent
 USER nobody:nogroup
-EXPOSE 3478/udp 3478/tcp
+EXPOSE 3478/udp 3478/tcp 443/tcp
 ENTRYPOINT ["/usr/local/bin/turn-agent"]

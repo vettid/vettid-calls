@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"text/template"
 
@@ -34,7 +35,7 @@ var tmpl = template.Must(template.New("turnserver.conf").Option("missingkey=erro
 const (
 	DefaultMaxKbps      = 256    // per allocation, each direction, while calls are voice only (D15)
 	DefaultCapacityKbps = 120000 // in total, staging: 40 allocations at C4's 3000 (D16 as revised)
-	DefaultUserQuota    = 10     // allocations per credential
+	DefaultUserQuota    = 12     // allocations per credential: 3 TURN URLs × 2 networks × 2 families (0.3.0)
 	DefaultTotalQuota   = 100    // allocations in total, staging (D16)
 	DefaultPromPort     = 9641   // coturn's Prometheus port, on 127.0.0.1
 
@@ -94,7 +95,28 @@ type Params struct {
 	PrometheusPort                               int
 	// RunDir holds the rendered configuration and the pid file (a tmpfs).
 	RunDir string
+	// TLS, if set, adds TURN over TLS on 443 with these files
+	// (CALLING-SERVICE 0.3.0 §7.2, §8.5); nil renders no-tls.
+	TLS *TLSFiles
 }
+
+// TLSFiles are the certificate chain and key coturn reads, in the run
+// directory.
+type TLSFiles struct {
+	Chain, Key string
+}
+
+// TLSPort is TURN over TLS's port (§7.2).
+const TLSPort = 443
+
+// TLSCiphers is coturn's cipher-list: ECDHE with AES-GCM or
+// ChaCha20-Poly1305 for TLS 1.2, and the TLS 1.3 suites (coturn 4.18.0
+// passes the one list to both of OpenSSL's setters). TLS 1.0 and 1.1 are
+// opt-in in 4.18.0 (tlsv1, tlsv1_1) and are not set; ec-curve-name is not
+// set, so OpenSSL's default groups, X25519MLKEM768 among them, stay.
+const TLSCiphers = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:" +
+	"ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305:" +
+	"TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
 
 // view is what the template sees.
 type view struct {
@@ -104,6 +126,9 @@ type view struct {
 	CapacityAllocations, MaxAllocations           int
 	UserQuota, TotalQuota                         int
 	PrometheusPort                                int
+	TLS                                           *TLSFiles
+	TLSPort                                       int
+	TLSCiphers                                    string
 }
 
 func orDefault(v, d int) int {
@@ -174,10 +199,17 @@ func Render(p Params) ([]byte, error) {
 	if p.RunDir == "" || strings.ContainsAny(p.RunDir, " \t\n\"") {
 		return nil, errors.New("turnagent: bad run directory")
 	}
+	if t := p.TLS; t != nil {
+		for _, f := range []string{t.Chain, t.Key} {
+			if f == "" || strings.ContainsAny(f, " \t\n\"") || filepath.Dir(f) != filepath.Clean(p.RunDir) {
+				return nil, errors.New("turnagent: the TLS files must be in the run directory")
+			}
+		}
+	}
 	v := view{Realm: p.Realm, Secrets: p.Secrets, RunDir: p.RunDir,
 		MaxKbps: orDefault(p.MaxKbps, DefaultMaxKbps), CapacityKbps: orDefault(p.CapacityKbps, DefaultCapacityKbps),
 		UserQuota: orDefault(p.UserQuota, DefaultUserQuota), TotalQuota: orDefault(p.TotalQuota, DefaultTotalQuota),
-		PrometheusPort: orDefault(p.PrometheusPort, DefaultPromPort)}
+		PrometheusPort: orDefault(p.PrometheusPort, DefaultPromPort), TLS: p.TLS, TLSPort: TLSPort, TLSCiphers: TLSCiphers}
 	if v.MaxKbps < 8 || v.CapacityKbps < v.MaxKbps || v.CapacityKbps > maxKbps || v.UserQuota < 1 || v.TotalQuota < 1 {
 		return nil, errors.New("turnagent: caps out of range")
 	}

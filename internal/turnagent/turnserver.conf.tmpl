@@ -1,5 +1,5 @@
 # turnserver.conf, rendered by turn-agent (vettid-calls) from
-# internal/turnagent/turnserver.conf.tmpl: CALLING-SERVICE 0.2.0 §7.2.
+# internal/turnagent/turnserver.conf.tmpl: CALLING-SERVICE 0.3.0 §7.2.
 # It holds the TURN secrets: it lives on a tmpfs only and is never logged.
 #
 # Option names and defaults are coturn 4.18.0's, checked against its
@@ -23,7 +23,8 @@ use-auth-secret
 static-auth-secret={{.}}
 {{- end}}
 
-# --- Listeners: STUN and TURN on UDP and TCP 3478; no TLS in C2 (§4.3) -----
+# --- Listeners: STUN and TURN on UDP and TCP 3478; TLS on 443 only while ---
+# --- turn-agent holds a valid certificate (0.3.0 §7.2, §8.5) -------------
 listening-port=3478
 {{- range .ListenIPs}}
 listening-ip={{.}}
@@ -36,7 +37,18 @@ external-ip={{.ExternalIPv4}}
 {{- end}}
 min-port=49152
 max-port=65535
+{{- if .TLS}}
+# TURN over TLS (0.3.0 §7.2). coturn detects TLS on every TCP listener, so
+# 3478/tcp also takes TLS and 443 also takes plain TURN. TLS 1.0 and 1.1
+# are opt-in in 4.18.0 and not set; no ec-curve-name (OpenSSL's default
+# groups stay, X25519MLKEM768 among them); no DTLS listener.
+tls-listening-port={{.TLSPort}}
+cert={{.TLS.Chain}}
+pkey={{.TLS.Key}}
+cipher-list="{{.TLSCiphers}}"
+{{- else}}
 no-tls
+{{- end}}
 fingerprint
 
 # --- Relaying (§7.2) --------------------------------------------------------

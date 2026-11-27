@@ -79,7 +79,7 @@ func TestRender(t *testing.T) {
 	// Caps: bytes per second (256 kbit/s, 120 Mbit/s), quotas.
 	one(t, o, "max-bps", "32000")
 	one(t, o, "bps-capacity", "15000000")
-	one(t, o, "user-quota", "10")
+	one(t, o, "user-quota", "12")
 	one(t, o, "total-quota", "100")
 	// Counters on loopback, no username labels.
 	one(t, o, "prometheus", "")
@@ -261,5 +261,57 @@ func TestRenderRefuses(t *testing.T) {
 	}
 	if o := options(t, conf); len(o["listening-ip"]) != 1 || len(o["allowed-peer-ip"]) != 1 {
 		t.Fatal("IPv4 only")
+	}
+}
+
+// TLS on 443 (CALLING-SERVICE 0.3.0 §7.2): the listener, the files, both
+// suite lists, and nothing that would add old versions or narrow the
+// groups.
+func TestRenderTLS(t *testing.T) {
+	p := params()
+	p.TLS = &TLSFiles{Chain: "/run/vettid-calls/tls-chain.pem", Key: "/run/vettid-calls/tls-key.pem"}
+	conf, err := Render(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := options(t, conf)
+	one(t, o, "tls-listening-port", "443")
+	one(t, o, "cert", "/run/vettid-calls/tls-chain.pem")
+	one(t, o, "pkey", "/run/vettid-calls/tls-key.pem")
+	one(t, o, "listening-port", "3478")
+	cl := o["cipher-list"]
+	if len(cl) != 1 || !strings.Contains(cl[0], "ECDHE-ECDSA-AES128-GCM-SHA256") || !strings.Contains(cl[0], "TLS_AES_128_GCM_SHA256") ||
+		strings.Contains(cl[0], "CBC") || strings.Contains(cl[0], "SHA:") || !strings.HasPrefix(cl[0], `"`) {
+		t.Errorf("cipher-list %q", cl)
+	}
+	for _, opt := range []string{"no-tls", "tlsv1", "tlsv1_1", "no-tlsv1", "no-tlsv1_1", "no-tlsv1_2", "ec-curve-name",
+		"dtls", "dtls-listening-port", "no-dtls", "dh-file", "cipher", "ca-file"} {
+		if _, ok := o[opt]; ok {
+			t.Errorf("%s is set", opt)
+		}
+	}
+	// Off: no-tls and none of the TLS lines.
+	conf, _ = Render(params())
+	o = options(t, conf)
+	one(t, o, "no-tls", "")
+	for _, opt := range []string{"tls-listening-port", "cert", "pkey", "cipher-list"} {
+		if _, ok := o[opt]; ok {
+			t.Errorf("off: %s is set", opt)
+		}
+	}
+}
+
+func TestRenderTLSFilesInRunDir(t *testing.T) {
+	for _, f := range []TLSFiles{
+		{Chain: "/etc/tls-chain.pem", Key: "/run/vettid-calls/tls-key.pem"},
+		{Chain: "/run/vettid-calls/tls-chain.pem", Key: "/run/vettid-calls/sub/tls-key.pem"},
+		{Chain: "/run/vettid-calls/a b.pem", Key: "/run/vettid-calls/tls-key.pem"},
+		{Chain: "", Key: "/run/vettid-calls/tls-key.pem"},
+	} {
+		p := params()
+		p.TLS = &f
+		if _, err := Render(p); err == nil {
+			t.Errorf("%+v accepted", f)
+		}
 	}
 }

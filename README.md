@@ -143,16 +143,23 @@ docker run --network host --read-only --log-driver none \
 | `CALLS_METRICS_NAMESPACE` | `vettid-calls` | e.g. `vettid-org/staging/calls` (§10) |
 | `CALLS_MAX_KBPS` | `256` | Bandwidth per allocation, each direction, kbit/s (D15; 3000 with video, C4) |
 | `CALLS_CAPACITY_KBPS` | `120000` | Bandwidth in total, kbit/s: 40 allocations at C4's 3000 (see "Caps" below) |
-| `CALLS_USER_QUOTA` / `CALLS_TOTAL_QUOTA` | `10` / `100` | Allocations per credential / in total |
+| `CALLS_USER_QUOTA` / `CALLS_TOTAL_QUOTA` | `12` / `100` | Allocations per credential (3 TURN URLs × 2 networks × 2 address families, 0.3.0) / in total |
 | `CALLS_RUN_DIR` | `/run/vettid-calls` | The tmpfs |
 | `CALLS_TURNSERVER` | `/usr/bin/turnserver` | coturn's binary |
+| `CALLS_TLS_SECRET_ID` / `CALLS_TLS_FILE` | (unset: no TLS) | TURN over TLS on 443 (CALLING-SERVICE 0.3.0 §8.5): the certificate secret's id, or a file holding its document (`{"key": "<PKCS#8 PEM>", "chain": "<PEM, leaf first>"}`; `{}` is none). Read with the TURN secret; the last valid one is kept across a failed read. coturn listens on 443 only while one is valid |
+| `CALLS_TURNS_STATUS` / `CALLS_TURNS_STATUS_FILE` | (unset) | With TLS only: the SSM parameter name, or a file, where the status for the issuer is put |
 
 ### Metrics of the server (once a minute)
 
 `allocations` (current), `allocations_refused{reason}` (`quota_user`,
 `quota_total`, `capacity`), `auth_failures`, `bytes_relayed`,
 `stun_bindings`, `heartbeat`; and, beyond §10, `coturn_restarts{reason}`
-(`secret`, `exit`) and `agent_errors{kind}`. `bytes_relayed` counts bytes
+(`secret`, `exit`, and with TLS `tls`, `tls_reload`) and `agent_errors{kind}`
+(`secret`, `config`, `start`, `exit`, `scrape`, `metrics`, and with TLS
+`tls_read`, `tls_invalid`, `tls_probe`, `tls_status`). With TLS (0.3.0
+§8.5): `tls`, 1 when the minute's handshake to the server's own 443, on
+each of its addresses, verified and served the certificate in use, and
+`tls_served_life_left` (percent of the served certificate's lifetime). `bytes_relayed` counts bytes
 coturn sent to clients and peers **of finished sessions** (that is what
 coturn's Prometheus counters hold): a long call is counted when it ends.
 For a cost alarm the instance's own `NetworkOut` is the better measure.

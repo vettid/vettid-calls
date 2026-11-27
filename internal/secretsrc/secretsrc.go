@@ -28,6 +28,10 @@ const RetryInterval = time.Minute
 // ErrNotFound is a secret the source does not have.
 var ErrNotFound = errors.New("secretsrc: secret not found")
 
+// ErrInvalid is a secret whose value is empty or too large: an answer,
+// not a failed read (turn-agent takes TLS off for it).
+var ErrInvalid = errors.New("secretsrc: the secret's value is empty or too large")
+
 // Source reads the secret document.
 type Source interface {
 	Get(ctx context.Context) ([]byte, error)
