@@ -156,4 +156,7 @@ func TestTURNSWarm(t *testing.T) {
 
 type countingStatus struct{ n int }
 
-func (c *countingStatus) Get(context.Context) ([]byte, error) { c.n++; return nil, turnsstatus.ErrNotFound }
+func (c *countingStatus) Get(context.Context) ([]byte, error) {
+	c.n++
+	return nil, turnsstatus.ErrNotFound
+}
