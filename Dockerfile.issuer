@@ -1,10 +1,12 @@
 # syntax=docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
-# VettID calling service: the credential issuer's function archive
-# (CALLING-SERVICE 0.2.0 §4.2, §8.2): a zip holding one file, "bootstrap",
-# the issuer built for linux/arm64 (Lambda's provided.al2023 runtime).
-# Deployments pin the archive by SHA-256 (cdk.json stagingCallsIssuer).
-#   make archive          # dist/vettid-calls-issuer-linux-arm64.zip
-#   make archive-repro    # two clean builds, compared
+# VettID calling service: the function archives, each a zip holding one
+# file, "bootstrap", built for linux/arm64 (Lambda's provided.al2023
+# runtime): the credential issuer (CALLING-SERVICE §4.2, §8.2) and
+# (0.3.0) the certificate renewer (§8.5). Deployments pin each archive by
+# SHA-256 (cdk.json stagingCallsIssuer, stagingCallsRenewer).
+#   make archive          # dist/vettid-calls-issuer-linux-arm64.zip and
+#                         # dist/vettid-calls-renewer-linux-arm64.zip
+#   make archive-repro    # two clean builds, both compared
 #
 # Reproducible: the toolchain image is pinned by digest, the build is
 # -trimpath with an empty build id and no VCS stamping, and tools/mkzip
@@ -18,8 +20,11 @@ COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-    go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=${VERSION}" -o /out/bootstrap ./cmd/vettid-calls \
- && go run ./tools/mkzip -o /out/vettid-calls-issuer-linux-arm64.zip -mtime "${SOURCE_DATE_EPOCH}" /out/bootstrap=bootstrap
+    go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=${VERSION}" -o /out/issuer/bootstrap ./cmd/vettid-calls \
+ && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+    go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=${VERSION}" -o /out/renewer/bootstrap ./cmd/calls-renewer \
+ && go run ./tools/mkzip -o /out/vettid-calls-issuer-linux-arm64.zip -mtime "${SOURCE_DATE_EPOCH}" /out/issuer/bootstrap=bootstrap \
+ && go run ./tools/mkzip -o /out/vettid-calls-renewer-linux-arm64.zip -mtime "${SOURCE_DATE_EPOCH}" /out/renewer/bootstrap=bootstrap
 
 FROM scratch AS archive
-COPY --from=build /out/vettid-calls-issuer-linux-arm64.zip /
+COPY --from=build /out/vettid-calls-issuer-linux-arm64.zip /out/vettid-calls-renewer-linux-arm64.zip /

@@ -112,3 +112,22 @@ func (l *Leaf) ChainPEM() []byte {
 func (l *Leaf) Doc() []byte {
 	return must(json.Marshal(map[string]string{"key": string(l.KeyPEM()), "chain": string(l.ChainPEM())}))
 }
+
+// SignCSR signs a certificate request's key and names as a leaf (a fake
+// CA's finalize).
+func (c *CA) SignCSR(der []byte, o Opts) *x509.Certificate {
+	req := must(x509.ParseCertificateRequest(der))
+	if err := req.CheckSignature(); err != nil {
+		panic(err)
+	}
+	now := time.Now()
+	if o.NotBefore.IsZero() {
+		o.NotBefore = now.Add(-time.Hour)
+	}
+	if o.NotAfter.IsZero() {
+		o.NotAfter = now.Add(90 * 24 * time.Hour)
+	}
+	tpl := &x509.Certificate{Subject: req.Subject, DNSNames: req.DNSNames, NotBefore: o.NotBefore, NotAfter: o.NotAfter,
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	return sign(tpl, c.Inter, req.PublicKey, c.interKey)
+}

@@ -42,9 +42,10 @@ VettID connections. It has two parts:
 | `cmd/vettid-calls` | The credential issuer: an AWS Lambda function (behind CloudFront) or an HTTP server |
 | `cmd/turn-agent` | The server image's entry point: secret → coturn configuration → coturn → metrics |
 | `cmd/callsctl` | The operator tool: the secret's lifecycle and test credentials |
+| `cmd/calls-renewer` | (0.3.0) The certificate renewer: an AWS Lambda function that gets and renews the TURN server's Let's Encrypt certificate (DNS-01 on Route 53) |
 | `internal/turnagent/turnserver.conf.tmpl` | coturn's configuration template (§7.2) |
 | `Dockerfile` | The server image: coturn 4.18.0 + `turn-agent` |
-| `Dockerfile.issuer` | The issuer's function archive (`bootstrap` for `provided.al2023`, arm64) |
+| `Dockerfile.issuer` | The function archives, the issuer's and the renewer's (`bootstrap` for `provided.al2023`, arm64) |
 | `internal/attest` | Attestation and manifest checks, shared with `vettid-push` (see "Shared code") |
 | `internal/turncred` | Usernames, credentials and the secret document; `testdata/vectors.json` |
 
@@ -251,6 +252,50 @@ CloudWatch keeps them per minute); as a server, EMF lines once a minute.
 Logs: one start line, and errors of the service at most once a minute
 per kind. Never a key, a document, a username, a credential or an
 address; the source address is not even read.
+
+## The certificate renewer (CALLING-SERVICE 0.3.0 §8.5)
+
+`cmd/calls-renewer` runs as a function: once a day from an EventBridge
+rule (`{"action":"renew"}`) and when the operator invokes it. It keeps the
+TURN server's certificate in the certificate secret, off the server;
+`turn-agent` reads it from there.
+
+| Action | What it does |
+|---|---|
+| `register` | With an empty account secret (`{}`): makes an account key, registers it with the CA, stores the key and the URL, and logs the URL (not a secret). With an account stored: changes nothing |
+| `renew` | Issues when no valid certificate is held, or less than a third of its lifetime is left; otherwise `kept`. Never registers |
+| `force` | Issues now |
+| `rekey` | Logs the serial held, issues now, puts the new certificate, then revokes every other certificate it issued that has not ended |
+| `revoke` | Issues nothing. Without `serials`: revokes every listed certificate but the current one. With `serials`: those, which must be listed; the current one only with `"current": true`. Signed with the account key, reason `keyCompromise` |
+| `rollover` | A new account key (RFC 8555 §7.3.5); the URL, and so the CAA record, stay |
+
+Issuing is DNS-01: the TXT record `_acme-challenge.<name>` is written,
+waited for until Route 53 reports it `INSYNC`, answered, and deleted
+whatever the outcome. The new chain is checked as `turn-agent` checks it
+(`internal/tlscert`) before it is put. The account secret also lists the
+certificates issued that have not ended (leaves only, no keys), so that
+`revoke` can reach one renewed away. With `CALLS_ACME_ACCOUNT` set, every
+action but `register` fails at step `account` unless the stored account
+is that one. A run stops at 4 minutes (the function's limit is 5) and is
+never retried by the stack.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CALLS_TURN_HOST` | (required) | The certificate's one name |
+| `CALLS_TLS_SECRET_ID` | (required) | The certificate secret (`{"key","chain"}`) |
+| `CALLS_ACME_ACCOUNT_SECRET_ID` | (required) | The account secret |
+| `CALLS_ACME_ACCOUNT` | (unset) | The pinned account URL (`stagingCallsAcmeAccount`) |
+| `CALLS_ACME_DIRECTORY` | Let's Encrypt's production directory | The CA |
+| `CALLS_ZONE_ID` | (required) | The hosted zone holding the name |
+| `AWS_REGION` | (required) | |
+| `CALLS_METRICS_NAMESPACE` | `vettid-calls` | e.g. `vettid-org/staging/calls` |
+
+Metrics, on every run: `renew{outcome}` (`kept`, `issued`, `registered`,
+`revoked`, `failed`) and `tls_life_left` (the held certificate's
+remaining validity, percent of its lifetime; 0 when none). Log: one line
+per run with the action, the outcome, the account URL, the serial and,
+on a failure, the step; never a key, a token or a record value. Its
+answer carries the same and no key material.
 
 ## Shared code
 
