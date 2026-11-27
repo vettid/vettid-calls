@@ -16,10 +16,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -199,6 +201,10 @@ func main() {
 	if *printConfig {
 		p := cfg.params
 		p.Secrets = []string{"REDACTED"}
+		if cfg.tlsSecretID != "" || cfg.tlsFile != "" {
+			// As rendered while a certificate is in use.
+			p.TLS = &turnagent.TLSFiles{Chain: filepath.Join(p.RunDir, turnagent.TLSChainName), Key: filepath.Join(p.RunDir, turnagent.TLSKeyName)}
+		}
 		b, _ := turnagent.Render(p)
 		os.Stdout.Write(b)
 		return
@@ -279,14 +285,20 @@ func run(ctx context.Context, cfg config) error {
 type tlsFileSource string
 
 func (f tlsFileSource) Get(context.Context) ([]byte, error) {
-	b, err := os.ReadFile(string(f))
-	switch {
-	case errors.Is(err, os.ErrNotExist):
+	fh, err := os.Open(string(f))
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, secretsrc.ErrNotFound
+	}
+	if err != nil {
+		return nil, errors.New("reading the TLS file failed")
+	}
+	defer fh.Close()
+	b, err := io.ReadAll(io.LimitReader(fh, tlscert.MaxDocument+1))
+	switch {
 	case err != nil:
 		return nil, errors.New("reading the TLS file failed")
-	case len(b) > tlscert.MaxDocument:
-		return nil, errors.New("the TLS file is too large")
+	case len(b) == 0 || len(b) > tlscert.MaxDocument:
+		return nil, secretsrc.ErrInvalid
 	}
 	return b, nil
 }

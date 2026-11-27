@@ -171,12 +171,20 @@ func LifeLeft(c *x509.Certificate, now time.Time) float64 {
 	return 100 * float64(left) / float64(total)
 }
 
-// Same reports whether two documents hold the same leaf and key.
+// Same reports whether two documents hold the same key and chain.
 func Same(a, b *Doc) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
 	type pub interface{ Equal(crypto.PublicKey) bool }
 	pa, ok := a.Key.Public().(pub)
-	return ok && pa.Equal(b.Key.Public()) && a.Leaf().Equal(b.Leaf())
+	if !ok || !pa.Equal(b.Key.Public()) || len(a.Chain) != len(b.Chain) {
+		return false
+	}
+	for i := range a.Chain {
+		if !a.Chain[i].Equal(b.Chain[i]) {
+			return false
+		}
+	}
+	return true
 }

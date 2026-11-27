@@ -71,7 +71,7 @@ func (s *Secret) Get(ctx context.Context) ([]byte, error) {
 		max = turncred.MaxDocument
 	}
 	if len(b) == 0 || len(b) > max {
-		return nil, fmt.Errorf("awsx: secret %s is empty or too large", s.ID)
+		return nil, fmt.Errorf("awsx: secret %s: %w", s.ID, secretsrc.ErrInvalid)
 	}
 	return b, nil
 }

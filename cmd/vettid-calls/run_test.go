@@ -207,7 +207,7 @@ func TestDevRoots(t *testing.T) {
 	}
 }
 
-// The binary links neither the test NSM nor anything of the tests.
+// The binaries link neither the test NSM, the test CA, nor anything of the tests.
 func TestDependencies(t *testing.T) {
 	if testing.Short() {
 		t.Skip("go list")
@@ -220,8 +220,10 @@ func TestDependencies(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v %s", pkg, err, out)
 		}
-		if strings.Contains(string(out), "internal/nsmtest") {
-			t.Fatalf("%s links internal/nsmtest", pkg)
+		for _, testOnly := range []string{"internal/nsmtest", "internal/tlscert/certtest"} {
+			if strings.Contains(string(out), testOnly) {
+				t.Fatalf("%s links %s", pkg, testOnly)
+			}
 		}
 	}
 }
