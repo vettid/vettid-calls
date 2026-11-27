@@ -68,6 +68,7 @@ type tlsHarness struct {
 	src   *certSource
 	put   *putter
 	now   time.Time
+	mu    sync.Mutex                   // serve and dials, which Run's goroutine reads
 	serve map[string]*x509.Certificate // by address; nil entry: the handshake fails
 	dials []string
 	a     *Agent
@@ -84,6 +85,8 @@ func newTLSHarness(t *testing.T) *tlsHarness {
 			if cfg.ServerName != realm || cfg.RootCAs == nil || cfg.MinVersion != tls.VersionTLS12 {
 				t.Errorf("probe config %+v", cfg)
 			}
+			h.mu.Lock()
+			defer h.mu.Unlock()
 			h.dials = append(h.dials, addr)
 			c, ok := h.serve[addr]
 			if !ok || c == nil {
@@ -99,7 +102,11 @@ const (
 	v6 = "[2600:1f18:1234:5600::20]:443"
 )
 
-func (h *tlsHarness) serveLeaf(c *x509.Certificate) { h.serve[v4], h.serve[v6] = c, c }
+func (h *tlsHarness) serveLeaf(c *x509.Certificate) {
+	h.mu.Lock()
+	h.serve[v4], h.serve[v6] = c, c
+	h.mu.Unlock()
+}
 func (h *tlsHarness) count(name, kind string) float64 {
 	return h.a.Metrics.Value(name, metrics.Dim{Name: "kind", Value: kind})
 }
@@ -716,5 +723,151 @@ func TestAgentRunReloadNeedsScrape(t *testing.T) {
 	<-done
 	if p.reloads() != 1 {
 		t.Fatalf("%d SIGUSR2 once the counters answer", p.reloads())
+	}
+}
+
+// A write that fails after the first temporary file is written leaves no
+// temporary file and the pair as it was.
+func TestTLSWriteCleanup(t *testing.T) {
+	h := newTLSHarness(t)
+	first := h.ca.Leaf(realm, certtest.Opts{})
+	h.src.set(first.Doc(), nil)
+	h.a.tlsLoad(context.Background(), false)
+	dir := h.a.Params.RunDir
+	keyBefore, _ := os.ReadFile(filepath.Join(dir, TLSKeyName))
+	// The chain's temporary path is a directory: the key's .tmp is written,
+	// the chain's fails.
+	if err := os.Mkdir(filepath.Join(dir, TLSChainName+".tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.src.set(h.ca.Leaf(realm, certtest.Opts{}).Doc(), nil)
+	h.now = h.now.Add(11 * time.Minute)
+	h.a.tlsLoad(context.Background(), false)
+	if _, err := os.Stat(filepath.Join(dir, TLSKeyName+".tmp")); !os.IsNotExist(err) {
+		t.Fatal("the key's .tmp was left")
+	}
+	keyAfter, _ := os.ReadFile(filepath.Join(dir, TLSKeyName))
+	if string(keyBefore) != string(keyAfter) || h.count("agent_errors", "config") != 1 {
+		t.Fatal("the key was replaced by a failed write")
+	}
+	if d, _ := tlscert.Parse(mustDoc(h.a.tlsFiles())); !d.Leaf().Equal(first.Cert) {
+		t.Fatal("the certificate in use changed")
+	}
+}
+
+// A failed read is retried after TLSRetry, not before; a missing secret is
+// an answer (TLS off), not a failed read.
+func TestTLSRetryAndNotFound(t *testing.T) {
+	h := newTLSHarness(t)
+	h.src.set(h.ca.Leaf(realm, certtest.Opts{}).Doc(), nil)
+	h.a.tlsLoad(context.Background(), false)
+	reads := 0
+	h.a.TLS.Source = sourceFunc(func(context.Context) ([]byte, error) { reads++; return nil, errors.New("network") })
+	h.now = h.now.Add(11 * time.Minute)
+	h.a.tlsLoad(context.Background(), false)
+	h.now = h.now.Add(TLSRetry - time.Second)
+	h.a.tlsLoad(context.Background(), false)
+	if reads != 1 {
+		t.Fatalf("retried before TLSRetry: %d reads", reads)
+	}
+	h.now = h.now.Add(time.Second)
+	h.a.tlsLoad(context.Background(), false)
+	if reads != 2 || h.a.tlsFiles() == nil {
+		t.Fatal("not retried, or a failed read dropped TLS")
+	}
+	h.a.TLS.Source = sourceFunc(func(context.Context) ([]byte, error) { return nil, secretsrc.ErrNotFound })
+	h.now = h.now.Add(TLSRetry)
+	h.a.tlsLoad(context.Background(), false)
+	if h.a.tlsFiles() != nil || h.count("agent_errors", "tls_read") != 2 || h.count("agent_errors", "tls_invalid") != 1 {
+		t.Fatal("a missing secret read as a failed read")
+	}
+}
+
+// An invalid read while coturn is down puts the zero status at once; a
+// failing put is tried once per tick, not twice.
+func TestTLSZeroWhileDown(t *testing.T) {
+	h := newTLSHarness(t)
+	l := h.ca.Leaf(realm, certtest.Opts{})
+	h.src.set(l.Doc(), nil)
+	h.a.tlsLoad(context.Background(), false)
+	h.serveLeaf(l.Cert)
+	h.a.tlsStep(context.Background(), &running{proc: &sigProc{}, tls: true, promUp: true})
+	if !h.a.TLS.published {
+		t.Fatal("not published")
+	}
+	h.src.set([]byte(`{}`), nil)
+	h.now = h.now.Add(11 * time.Minute)
+	n := len(h.put.puts)
+	h.a.tlsStep(context.Background(), nil) // coturn down
+	if len(h.put.puts) != n+1 || h.put.puts[n] != (turnsstatus.Status{}) {
+		t.Fatal("no zero status while coturn is down", h.put.puts)
+	}
+	// Failing puts: one tls_status in the tick, not one per attempt.
+	h2 := newTLSHarness(t)
+	h2.src.set(h2.ca.Leaf(realm, certtest.Opts{}).Doc(), nil)
+	h2.a.tlsLoad(context.Background(), false)
+	h2.a.TLS.published, h2.a.TLS.known = true, true
+	h2.put.err = errors.New("denied")
+	h2.src.set([]byte(`{}`), nil)
+	h2.now = h2.now.Add(11 * time.Minute)
+	h2.a.tlsStep(context.Background(), nil)
+	if h2.count("agent_errors", "tls_status") != 1 {
+		t.Fatal("tls_status", h2.count("agent_errors", "tls_status"))
+	}
+	h2.put.err = nil
+	h2.now = h2.now.Add(time.Minute)
+	h2.a.tlsStep(context.Background(), nil)
+	if len(h2.put.puts) != 1 || h2.a.TLS.published {
+		t.Fatal("not retried at the next tick")
+	}
+}
+
+// Through Run: a secret change and a renewal read in the same tick give one
+// restart with the new files, and no SIGUSR2 to the new coturn.
+func TestAgentRunLoadBeforeRestart(t *testing.T) {
+	h := newTLSHarness(t)
+	l := h.ca.Leaf(realm, certtest.Opts{})
+	h.src.set(l.Doc(), nil)
+	h.serveLeaf(l.Cert)
+	var mu sync.Mutex
+	clock := h.now
+	h.a.TLS.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	sec := &mutableSource{doc: `{"current":"a","secrets":{"a":"` + secA + `"}}`}
+	h.a.Secrets = &secretsrc.Holder{Source: sec, Now: h.a.TLS.Now}
+	h.a.Sink = metrics.Discard{}
+	procs := make(chan *runProc, 4)
+	h.a.Start = func(string, io.Writer) (Process, error) {
+		p := &runProc{done: make(chan struct{})}
+		procs <- p
+		return p, nil
+	}
+	h.a.Scrape = func(context.Context) (Scrape, error) { return ParseExposition(strings.NewReader(exposition)) }
+	h.a.Interval, h.a.RestartDelay, h.a.StopTimeout = 5*time.Millisecond, time.Millisecond, time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- h.a.Run(ctx) }()
+	<-procs
+	time.Sleep(30 * time.Millisecond) // the first coturn's counters answer
+	renewed := h.ca.Leaf(realm, certtest.Opts{})
+	h.src.set(renewed.Doc(), nil)
+	sec.set(`{"current":"b","secrets":{"a":"` + secA + `","b":"` + secB + `"}}`)
+	mu.Lock()
+	clock = clock.Add(11 * time.Minute)
+	mu.Unlock()
+	var second *runProc
+	select {
+	case second = <-procs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no restart for the secret")
+	}
+	h.serveLeaf(renewed.Cert)
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	<-done
+	if second.reloads() != 0 {
+		t.Fatal("SIGUSR2 to a coturn started after the files were written")
+	}
+	if d, _ := tlscert.Parse(mustDoc(h.a.tlsFiles())); !d.Leaf().Equal(renewed.Cert) {
+		t.Fatal("not restarted with the renewed files")
 	}
 }

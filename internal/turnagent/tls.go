@@ -31,6 +31,9 @@ const (
 	TLSRetry = secretsrc.RetryInterval
 	// StatusRefresh: the status is put again this often while verified.
 	StatusRefresh = 10 * time.Minute
+	// putRetry: after a failed put, none is tried again sooner (so one
+	// tick counts one tls_status, not one per attempt).
+	putRetry = 30 * time.Second
 	// ReloadTimeout: a SIGUSR2 whose certificate is still not served
 	// this long after is followed by a restart.
 	ReloadTimeout = 10 * time.Minute
@@ -73,6 +76,7 @@ type TLS struct {
 	reloadAt     time.Time         // when the new files were written; zero: no reload waits
 	published    bool              // the last status put says verified
 	known        bool              // a status has been put since start
+	failedAt     time.Time         // the last put that failed; zero after a success
 	statusAt     time.Time         // when it was put
 }
 
@@ -167,8 +171,12 @@ func (a *Agent) writeTLS(d *tlscert.Doc) error {
 			_ = os.Remove(f.path + ".tmp")
 		}
 	}
-	// Both written first, then both renamed: a failure leaves the pair in
-	// place as it was, never a new key with an old chain.
+	// Both written first, then both renamed. A failed write leaves the
+	// files as they were. A failed second rename can leave the new key
+	// beside the old chain (or, at a first write, a key alone); the
+	// certificate is then not taken into use, no SIGUSR2 is sent (coturn
+	// keeps serving what it loaded), and the write is tried again after
+	// TLSRetry, which puts the pair together.
 	for _, f := range files {
 		if err := os.WriteFile(f.path+".tmp", f.b, 0o600); err != nil {
 			cleanup()
@@ -315,6 +323,10 @@ func dialLeaf(ctx context.Context, addr string, cfg *tls.Config) (*x509.Certific
 // is tried again at the next step.
 func (a *Agent) putStatus(ctx context.Context, s turnsstatus.Status) {
 	t := a.TLS
+	now := t.now()
+	if !t.failedAt.IsZero() && now.Sub(t.failedAt) < putRetry && !now.Before(t.failedAt) {
+		return // one attempt per tick: tried again at the next
+	}
 	if t.Status == nil {
 		t.published, t.known, t.statusAt = s.VerifiedAt > 0, true, t.now()
 		return
@@ -322,8 +334,10 @@ func (a *Agent) putStatus(ctx context.Context, s turnsstatus.Status) {
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := t.Status.Put(pctx, s.Encode()); err != nil {
+		t.failedAt = now
 		a.fail("tls_status", errors.New("turnagent: putting the TLS status failed"))
 		return
 	}
+	t.failedAt = time.Time{}
 	t.published, t.known, t.statusAt = s.VerifiedAt > 0, true, t.now()
 }

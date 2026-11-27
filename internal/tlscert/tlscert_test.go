@@ -134,3 +134,16 @@ func mustMarshal(d *Doc) []byte {
 	}
 	return b
 }
+
+// Same compares the whole chain, not only the key and the leaf.
+func TestSameChain(t *testing.T) {
+	ca := certtest.NewCA(time.Time{}, time.Time{})
+	other := certtest.NewCA(time.Time{}, time.Time{})
+	l := ca.Leaf(name, certtest.Opts{})
+	a, _ := Parse(l.Doc())
+	b := &Doc{Key: a.Key, Chain: []*x509.Certificate{a.Leaf(), other.Inter}}
+	c := &Doc{Key: a.Key, Chain: []*x509.Certificate{a.Leaf()}}
+	if Same(a, b) || Same(a, c) {
+		t.Fatal("another chain counted as the same")
+	}
+}

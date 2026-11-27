@@ -199,14 +199,7 @@ func main() {
 		os.Exit(2)
 	}
 	if *printConfig {
-		p := cfg.params
-		p.Secrets = []string{"REDACTED"}
-		if cfg.tlsSecretID != "" || cfg.tlsFile != "" {
-			// As rendered while a certificate is in use.
-			p.TLS = &turnagent.TLSFiles{Chain: filepath.Join(p.RunDir, turnagent.TLSChainName), Key: filepath.Join(p.RunDir, turnagent.TLSKeyName)}
-		}
-		b, _ := turnagent.Render(p)
-		os.Stdout.Write(b)
+		os.Stdout.Write(printed(cfg))
 		return
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -215,6 +208,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, "turn-agent:", err)
 		os.Exit(1)
 	}
+}
+
+// printed is -print-config's output: the configuration with the secrets
+// replaced, and with TLS configured, as rendered while a certificate is in
+// use.
+func printed(cfg config) []byte {
+	p := cfg.params
+	p.Secrets = []string{"REDACTED"}
+	if cfg.tlsSecretID != "" || cfg.tlsFile != "" {
+		p.TLS = &turnagent.TLSFiles{Chain: filepath.Join(p.RunDir, turnagent.TLSChainName), Key: filepath.Join(p.RunDir, turnagent.TLSKeyName)}
+	}
+	b, _ := turnagent.Render(p)
+	return b
 }
 
 func run(ctx context.Context, cfg config) error {
