@@ -1,0 +1,273 @@
+package turnsstatus
+
+import (
+	"context"
+	"errors"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestParse(t *testing.T) {
+	good := map[string]Status{
+		`{"verified_at":1,"not_after":2}`:                {1, 2},
+		`{"not_after":2,"verified_at":1}`:                {1, 2},
+		` { "verified_at" : 0 , "not_after" : 0 } `:      {},
+		`{"verified_at":9007199254740992,"not_after":0}`: {1 << 53, 0},
+	}
+	for in, want := range good {
+		got, err := Parse([]byte(in))
+		if err != nil || got != want {
+			t.Errorf("%s: %+v %v", in, got, err)
+		}
+	}
+	bad := []string{
+		``,
+		`null`,
+		`[]`,
+		`{}`,
+		`{"verified_at":1}`,
+		`{"verified_at":1,"not_after":2,"x":3}`,
+		`{"verified_at":1,"verified_at":2,"not_after":3}`,
+		`{"verified_at":1,"not_after":2}{}`,
+		`{"verified_at":1,"not_after":2} x`,
+		`{"verified_at":"1","not_after":2}`,
+		`{"verified_at":1.0,"not_after":2}`,
+		`{"verified_at":1e3,"not_after":2}`,
+		`{"verified_at":-1,"not_after":2}`,
+		`{"verified_at":9007199254740993,"not_after":2}`,
+		`{"verified_at":true,"not_after":2}`,
+		`{"verified_at":1,"x":2}`,
+		`{"verified_at":1,"not_after":2` + strings.Repeat(" ", MaxSize) + `}`,
+	}
+	for _, in := range bad {
+		if _, err := Parse([]byte(in)); err == nil {
+			t.Errorf("accepted %q", in)
+		}
+	}
+}
+
+func TestEncodeParses(t *testing.T) {
+	s := Status{VerifiedAt: 1764250000, NotAfter: 1772000000}
+	if got, err := Parse(s.Encode()); err != nil || got != s {
+		t.Fatalf("%s: %+v %v", s.Encode(), got, err)
+	}
+	if string(Status{}.Encode()) != `{"verified_at":0,"not_after":0}` {
+		t.Fatal(string(Status{}.Encode()))
+	}
+}
+
+func TestFresh(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	end := now.Add(30 * 24 * time.Hour).Unix()
+	cases := []struct {
+		name string
+		s    Status
+		want bool
+	}{
+		{"just verified", Status{now.Unix(), end}, true},
+		{"24 min old", Status{now.Add(-24 * time.Minute).Unix(), end}, true},
+		{"25 min old", Status{now.Add(-25 * time.Minute).Unix(), end}, false},
+		{"zero", Status{0, end}, false},
+		{"never", Status{}, false},
+		{"5 min ahead", Status{now.Add(5 * time.Minute).Unix(), end}, true},
+		{"6 min ahead", Status{now.Add(6 * time.Minute).Unix(), end}, false},
+		{"far future", Status{now.Add(1000 * time.Hour).Unix(), end}, false},
+		{"certificate ended", Status{now.Unix(), now.Unix()}, false},
+		{"certificate ends in a second", Status{now.Unix(), now.Unix() + 1}, true},
+	}
+	for _, c := range cases {
+		if got := c.s.Fresh(now); got != c.want {
+			t.Errorf("%s: %v", c.name, got)
+		}
+	}
+}
+
+type src struct {
+	b     []byte
+	err   error
+	calls int
+}
+
+func (s *src) Get(context.Context) ([]byte, error) { s.calls++; return s.b, s.err }
+
+func TestHolder(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	clock := func() time.Time { return now }
+	good := Status{now.Unix(), now.Add(time.Hour).Unix()}
+	s := &src{b: good.Encode()}
+	var reports int
+	var last string
+	h := &Holder{Source: s, Now: clock, Report: func(_ Status, o string, _ error) { reports++; last = o }}
+	ctx := context.Background()
+
+	if h.Get(ctx) != good || s.calls != 1 {
+		t.Fatal("first read")
+	}
+	// Within RefreshInterval: no read.
+	now = now.Add(9 * time.Minute)
+	if h.Get(ctx) != good || s.calls != 1 {
+		t.Fatal("read too early")
+	}
+	// A failed read keeps the last status (Fresh still ages it).
+	now = now.Add(2 * time.Minute)
+	s.err = errors.New("network")
+	if h.Get(ctx) != good || s.calls != 2 {
+		t.Fatal("a failed read dropped the status")
+	}
+	// Retried after RetryInterval, not before.
+	now = now.Add(30 * time.Second)
+	h.Get(ctx)
+	if s.calls != 2 {
+		t.Fatal("retried before RetryInterval")
+	}
+	now = now.Add(31 * time.Second)
+	h.Get(ctx)
+	if s.calls != 3 {
+		t.Fatal("not retried")
+	}
+	// A malformed value is "not verified", not "keep".
+	s.err, s.b = nil, []byte(`{"verified_at":1}`)
+	now = now.Add(time.Minute)
+	if h.Get(ctx) != (Status{}) || last != OutcomeMalformed {
+		t.Fatal("a malformed value was kept or not reported", last)
+	}
+	// Missing is "not verified".
+	s.b, s.err = good.Encode(), nil
+	now = now.Add(11 * time.Minute)
+	if h.Get(ctx) != good {
+		t.Fatal("good again")
+	}
+	s.err = ErrNotFound
+	now = now.Add(11 * time.Minute)
+	if h.Get(ctx) != (Status{}) || last != OutcomeMissing {
+		t.Fatal("a missing status was kept", last)
+	}
+	if reports != s.calls {
+		t.Fatalf("reports %d, reads %d", reports, s.calls)
+	}
+}
+
+func TestHolderFirstReadFails(t *testing.T) {
+	h := &Holder{Source: &src{err: errors.New("network")}}
+	if h.Get(context.Background()).Fresh(time.Now()) {
+		t.Fatal("verified without a read")
+	}
+}
+
+// A verified_at more than MaxAhead ahead is refused while it is that far
+// ahead: not stored to become fresh later without a read (a value 20
+// minutes ahead would otherwise be listed from +15 to +44 minutes).
+func TestHolderFuture(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	now := t0
+	future := Status{VerifiedAt: t0.Add(20 * time.Minute).Unix(), NotAfter: t0.Add(48 * time.Hour).Unix()}
+	var last string
+	s := &src{b: future.Encode()}
+	h := &Holder{Source: s, Now: func() time.Time { return now }, Report: func(_ Status, o string, _ error) { last = o }}
+	if h.Get(context.Background()) != (Status{}) || last != OutcomeFuture {
+		t.Fatal("a future value was stored", last)
+	}
+	// Later reads fail, so whatever was stored is kept: nothing is listed
+	// as the clock passes the value's time.
+	s.err = errors.New("network")
+	for _, d := range []time.Duration{15 * time.Minute, 20 * time.Minute, 30 * time.Minute, 44 * time.Minute} {
+		now = t0.Add(d)
+		if h.Get(context.Background()).Fresh(now) {
+			t.Fatalf("listed at +%v", d)
+		}
+	}
+}
+
+// A clock that goes back: the next read is not held off for ever.
+func TestHolderClockBack(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	s := &src{b: Status{VerifiedAt: now.Unix(), NotAfter: now.Add(time.Hour).Unix()}.Encode()}
+	h := &Holder{Source: s, Now: func() time.Time { return now }}
+	h.Get(context.Background())
+	now = now.Add(-time.Hour)
+	h.Get(context.Background())
+	if s.calls != 2 {
+		t.Fatalf("not read again after the clock went back: %d reads", s.calls)
+	}
+}
+
+// A source that blocks is cut at ReadTimeout.
+func TestHolderReadTimeout(t *testing.T) {
+	h := &Holder{Source: blockingSource{}}
+	start := time.Now()
+	h.Get(context.Background())
+	// Literal bounds: a longer ReadTimeout fails this, not only a broken cut.
+	if d := time.Since(start); d < 900*time.Millisecond || d > 1500*time.Millisecond {
+		t.Fatalf("read took %v", d)
+	}
+}
+
+type blockingSource struct{}
+
+func (blockingSource) Get(ctx context.Context) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }
+
+// As it is: a value refused while far ahead is accepted by a later read
+// that finds it within MaxAhead (the issuer keeps no state to tell; the
+// writer's clock is the guard).
+func TestHolderFutureReRead(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	now := t0
+	future := Status{VerifiedAt: t0.Add(20 * time.Minute).Unix(), NotAfter: t0.Add(48 * time.Hour).Unix()}
+	var last string
+	h := &Holder{Source: &src{b: future.Encode()}, Now: func() time.Time { return now },
+		Report: func(_ Status, o string, _ error) { last = o }}
+	for _, c := range []struct {
+		at      time.Duration
+		outcome string
+		listed  bool
+	}{
+		{0, OutcomeFuture, false},
+		{10 * time.Minute, OutcomeFuture, false},
+		{20 * time.Minute, OutcomeOK, true},
+		{44 * time.Minute, OutcomeOK, true},
+		{46 * time.Minute, OutcomeOK, false},
+	} {
+		now = t0.Add(c.at)
+		h.loaded = time.Time{} // read each time
+		st := h.Get(context.Background())
+		if last != c.outcome || st.Fresh(now) != c.listed {
+			t.Errorf("+%v: %s, listed %v", c.at, last, st.Fresh(now))
+		}
+	}
+}
+
+// The MaxAhead boundary when read: exactly 5 minutes ahead is ok, a
+// second more is future.
+func TestHolderAheadBoundary(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	for ahead, want := range map[time.Duration]string{MaxAhead: OutcomeOK, MaxAhead + time.Second: OutcomeFuture} {
+		var last string
+		v := Status{VerifiedAt: now.Add(ahead).Unix(), NotAfter: now.Add(time.Hour).Unix()}
+		h := &Holder{Source: &src{b: v.Encode()}, Now: func() time.Time { return now },
+			Report: func(_ Status, o string, _ error) { last = o }}
+		h.Get(context.Background())
+		if last != want {
+			t.Errorf("%v ahead: %s, want %s", ahead, last, want)
+		}
+	}
+	if MaxAhead != 5*time.Minute || MaxAge != 25*time.Minute || ReadTimeout != time.Second {
+		t.Fatal("the §8.5 numbers changed")
+	}
+}
+
+// The file source reads at most MaxSize+1 bytes.
+func TestFileBounded(t *testing.T) {
+	p := t.TempDir() + "/status.json"
+	if err := os.WriteFile(p, []byte(strings.Repeat(" ", 10*MaxSize)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, err := File(p).Get(context.Background())
+	if err != nil || len(b) != MaxSize+1 {
+		t.Fatalf("%d bytes, %v", len(b), err)
+	}
+	if _, err := File(p + ".absent").Get(context.Background()); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
+	}
+}

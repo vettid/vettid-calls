@@ -53,6 +53,11 @@ type Config struct {
 	SecretEnv  string // CALLS_SECRET_ENV (env): the variable holding the document
 	Region     string // AWS_REGION / AWS_DEFAULT_REGION
 
+	// TLS on 443 (CALLING-SERVICE 0.3.0 §8.5): set only while it is
+	// switched on. At most one of the two; with neither, no turns: URL.
+	TURNSStatus     string // CALLS_TURNS_STATUS: the SSM parameter of the server's TLS status (needs AWS_REGION)
+	TURNSStatusFile string // CALLS_TURNS_STATUS_FILE: the same as a file (self-hosting, development)
+
 	Metrics          string // CALLS_METRICS: cloudwatch | emf | none
 	MetricsNamespace string // CALLS_METRICS_NAMESPACE
 
@@ -65,6 +70,8 @@ type Config struct {
 var (
 	pcrRE = regexp.MustCompile(`^[0-9a-f]{96}$`)
 	nsRE  = regexp.MustCompile(`^[A-Za-z0-9._/#:-]{1,255}$`)
+	// An SSM parameter name with its path (at most 1011 characters).
+	paramRE = regexp.MustCompile(`^/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$`)
 )
 
 func list(v string) []string {
@@ -155,6 +162,17 @@ func Load(lookup func(string) (string, bool), dev bool) (Config, error) {
 		}
 	default:
 		bad("CALLS_SECRETS must be aws, file or env")
+	}
+
+	c.TURNSStatus = get("CALLS_TURNS_STATUS")
+	c.TURNSStatusFile = get("CALLS_TURNS_STATUS_FILE")
+	switch {
+	case c.TURNSStatus != "" && c.TURNSStatusFile != "":
+		bad("set at most one of CALLS_TURNS_STATUS and CALLS_TURNS_STATUS_FILE")
+	case c.TURNSStatus != "" && (!paramRE.MatchString(c.TURNSStatus) || len(c.TURNSStatus) > 1011):
+		bad("CALLS_TURNS_STATUS is not an SSM parameter name (/path/name)")
+	case c.TURNSStatus != "" && c.Region == "":
+		bad("AWS_REGION is required with CALLS_TURNS_STATUS")
 	}
 
 	c.Metrics = get("CALLS_METRICS")

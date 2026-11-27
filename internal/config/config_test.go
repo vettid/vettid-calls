@@ -44,6 +44,19 @@ func TestRefusals(t *testing.T) {
 		"bad metrics":       func(m map[string]string) { m["CALLS_METRICS"] = "prometheus" },
 		"dev vars, no -dev": func(m map[string]string) { m["CALLS_DEV_PCR0S"] = strings.Repeat("a", 96) },
 		"bad log level":     func(m map[string]string) { m["CALLS_LOG_LEVEL"] = "debug" },
+		"two TLS statuses": func(m map[string]string) {
+			m["CALLS_TURNS_STATUS"] = "/vettid-org/staging/calls/turns-status"
+			m["CALLS_TURNS_STATUS_FILE"] = "/run/status"
+		},
+		"status not a parameter name": func(m map[string]string) { m["CALLS_TURNS_STATUS"] = "vettid-org/staging/turns-status" },
+		"status with a space":         func(m map[string]string) { m["CALLS_TURNS_STATUS"] = "/vettid-org/a b" },
+		"status, no region": func(m map[string]string) {
+			delete(m, "AWS_REGION")
+			m["CALLS_SECRETS"] = "env"
+			m["CALLS_SECRET_ENV"] = "X"
+			m["CALLS_METRICS"] = "none"
+			m["CALLS_TURNS_STATUS"] = "/vettid-org/staging/calls/turns-status"
+		},
 		"cloudwatch, region": func(m map[string]string) {
 			delete(m, "AWS_REGION")
 			m["CALLS_SECRETS"] = "env"
@@ -75,5 +88,23 @@ func TestDev(t *testing.T) {
 	m["CALLS_DEV_PCR0S"] = "abc"
 	if _, err := Load(env(m), true); err == nil {
 		t.Fatal("a short PCR0")
+	}
+}
+
+// TLS on 443 (CALLING-SERVICE 0.3.0 §8.5): the status's parameter or file.
+func TestTURNSStatus(t *testing.T) {
+	m := base()
+	m["CALLS_TURNS_STATUS"] = "/vettid-org/staging/calls/turns-status"
+	c, err := Load(env(m), false)
+	if err != nil || c.TURNSStatus != "/vettid-org/staging/calls/turns-status" || c.TURNSStatusFile != "" {
+		t.Fatalf("%v %+v", err, c)
+	}
+	m = base()
+	m["CALLS_TURNS_STATUS_FILE"] = "/run/vettid-calls/turns-status.json"
+	if c, err = Load(env(m), false); err != nil || c.TURNSStatusFile == "" || c.TURNSStatus != "" {
+		t.Fatalf("%v %+v", err, c)
+	}
+	if c, err = Load(env(base()), false); err != nil || c.TURNSStatus != "" || c.TURNSStatusFile != "" {
+		t.Fatalf("off by default: %v %+v", err, c)
 	}
 }

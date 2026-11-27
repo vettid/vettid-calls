@@ -188,7 +188,8 @@ TLS terminator.
 | `CALLS_MAX_INFLIGHT` | `4` | Requests handled at once; more are answered 429 (§7.5) |
 | `CALLS_SECRETS` | `aws` | `aws`, `file` or `env` (`none` under `-dev`: a random secret) |
 | `CALLS_SECRET_ID` / `CALLS_SECRET_FILE` / `CALLS_SECRET_ENV` | | Where the document is |
-| `AWS_REGION` | | For Secrets Manager and CloudWatch |
+| `CALLS_TURNS_STATUS` / `CALLS_TURNS_STATUS_FILE` | (unset: TLS off) | The TURN server's TLS status, as an SSM parameter name or a file (CALLING-SERVICE 0.3.0 §8.5). Set only while TLS on 443 is switched on; answers then list `turns:<host>:443?transport=tcp` while the status is fresh (verified less than 25 minutes ago, at most 5 minutes ahead, certificate not ended). Missing or malformed means not listed; it never fails a request |
+| `AWS_REGION` | | For Secrets Manager, SSM and CloudWatch |
 | `CALLS_METRICS` | `cloudwatch` in Lambda, else `emf` | `cloudwatch`, `emf` or `none` |
 | `CALLS_METRICS_NAMESPACE` | `vettid-calls/<channel>` | e.g. `vettid-org/staging/calls` |
 | `CALLS_LOG_LEVEL` | `info` | `info`, `warn` or `error` |
@@ -205,7 +206,8 @@ X-VettID-Attestation: <base64 Nitro attestation document>
 { "count": 1..4 }
 
 → 200 { "stun": ["stun:<host>:3478"],
-        "turn": ["turn:<host>:3478?transport=udp", "turn:<host>:3478?transport=tcp"],
+        "turn": ["turn:<host>:3478?transport=udp", "turn:<host>:3478?transport=tcp"
+                 (, "turns:<host>:443?transport=tcp" while TLS is on and verified)],
         "credentials": [ { "username": "<expiry>:<random>", "credential": "<base64>", "exp": <unix s> } ] }
 
 GET /v1/health → 200 {}
@@ -231,7 +233,12 @@ after the last successful refresh.
 
 Metrics: `requests{outcome}`, `attestation_failures{reason}`,
 `manifest_refresh{outcome}`, `internal_errors`, and (beyond §10)
-`secret_refresh{outcome}`; every value from a closed set. In Lambda they
+`secret_refresh{outcome}`; while TLS is on (0.3.0 §8.5), `turns_listed`
+(1 or 0, set at each answer and put as the last value of the minute: a
+gauge, not a count), `turns_status_refresh{outcome}` (`ok`, `missing`,
+`malformed`, `future`, `error`) and `turns_status_age` (seconds, at each
+read);
+every value from a closed set. In Lambda they
 are put with PutMetricData after each request (standard resolution, so
 CloudWatch keeps them per minute); as a server, EMF lines once a minute.
 Logs: one start line, and errors of the service at most once a minute
